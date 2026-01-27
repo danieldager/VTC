@@ -15,3 +15,9 @@ dependencies = [
 
 [tool.uv.sources]
 segma = { git = "https://github.com/arxaqapi/segma", rev = "ea8a54be363ef3ce15e00a7252eb637dcfaac495" }
+
+[tool.uv]
+override-dependencies = [
+    "torch==2.6.0",
+    "torchaudio==2.6.0",
+]

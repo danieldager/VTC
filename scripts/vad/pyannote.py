@@ -43,7 +43,7 @@ class AudioDataset(Dataset):
 
 def load_env():
     """Load .env file if it exists."""
-    env_file = Path(__file__).parent.parent / ".env"
+    env_file = Path(__file__).parent.parent.parent / ".env"
     print(f"Loading environment from {env_file}...")
     if env_file.exists():
         for line in env_file.read_text().splitlines():
