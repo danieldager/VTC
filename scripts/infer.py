@@ -2,6 +2,7 @@ import argparse
 import copy
 import logging
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Literal
 
@@ -50,7 +51,14 @@ def load_rttm(path: Path | str) -> pl.DataFrame:
             separator=" ",
         )
     except pl.exceptions.NoDataError:
-        data = pl.DataFrame(None, ("uid", "start_time_s", "duration_s", "label"))
+        data = pl.DataFrame(
+            schema={
+                "uid": pl.String,
+                "start_time_s": pl.Float64,
+                "duration_s": pl.Float64,
+                "label": pl.String,
+            }
+        )
 
     return data
 
@@ -88,7 +96,7 @@ def process_annot(
         active = active.support(collar=min_duration_off_s)
     # NOTE - remove regions shorter than that many seconds.
     if min_duration_on_s > 0:
-        for segment, track in list(active.itertracks()):
+        for segment, track, *_ in list(active.itertracks()):
             if segment.duration < min_duration_on_s:
                 del active[segment, track]
     return active
@@ -96,7 +104,7 @@ def process_annot(
 
 def merge_segments(
     file_uris_to_merge: list[str],
-    output: str,
+    output: str | Path,
     min_duration_on_s: float = 0.1,
     min_duration_off_s: float = 0.1,
     write_empty: bool = True,
@@ -160,8 +168,9 @@ def check_audio_files(audio_files_to_process: list[Path]) -> None:
 
 
 def main(
-    output: str,
+    output: str | Path,
     uris: Path | None = None,
+    manifest: Path | None = None,
     config: str = "VTC-2.0/model/config.yml",
     wavs: str = "data/debug/wav",
     checkpoint: str = "VTC-2.0/model/best.ckpt",
@@ -174,7 +183,9 @@ def main(
     write_csv: bool = True,
     recursive_search: bool = False,
     device: Literal["gpu", "cuda", "cpu", "mps"] = "gpu",
-    keep_raw: bool = False,
+    keep_raw: bool = True,  # Hardcoded to true
+    array_id: int | None = None,
+    array_count: int | None = None,
 ):
     """Run sliding inference on the given files and then merges the created segments.
 
@@ -199,8 +210,53 @@ def main(
     if thresholds:
         shutil.copy(str(thresholds), dst=output)
         logger.info(f"Using thresholds: {thresholds}")
+        thresholds = None  # NOTE - monkeypatch !
 
-    output = Path(output)
+    # Handle manifest input: read paths and create temporary URI file
+    if manifest:
+        manifest_path = Path(manifest)
+        if manifest_path.suffix == ".parquet":
+            df = pl.read_parquet(manifest_path)
+        else:
+            df = pl.read_csv(manifest_path)
+
+        # Extract paths from the manifest
+        paths = df.select("path").to_series().to_list()
+
+        # Create a temporary file with absolute paths (one per line)
+        temp_uris = tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt")
+        for path in paths:
+            temp_uris.write(f"{path}\n")
+        temp_uris.close()
+
+        # Split paths across array tasks if running in array job
+        if array_id is not None and array_count is not None:
+            # Distribute files across array tasks
+            chunk_size = len(paths) // array_count
+            start_idx = array_id * chunk_size
+            if array_id == array_count - 1:
+                # Last task gets remaining files
+                end_idx = len(paths)
+            else:
+                end_idx = start_idx + chunk_size
+
+            paths = paths[start_idx:end_idx]
+            logger.info(
+                f"Array task {array_id}/{array_count-1}: processing {len(paths)} files (indices {start_idx}-{end_idx-1})"
+            )
+
+        # Create a temporary file with absolute paths (one per line)
+        temp_uris = tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt")
+        for path in paths:
+            temp_uris.write(f"{path}\n")
+        temp_uris.close()
+
+        # Override uris and wavs to use the manifest paths directly
+        uris = Path(temp_uris.name)
+        wavs = "/"  # Use root; absolute paths in uris file will bypass this
+        logger.info(f"Loaded {len(paths)} files from manifest: {manifest}")
+
+    output = Path("output") / output
 
     logger.info("Running inference on audio files.")
     processed_files = run_inference_on_audios(
@@ -267,6 +323,11 @@ if __name__ == "__main__":
         help="Folder containing the audio files to run inference on.",
     )
     parser.add_argument(
+        "--manifest",
+        type=str,
+        help="Path to a manifest file (csv/parquet) containing the list of audio files.",
+    )
+    parser.add_argument(
         "--checkpoint",
         default="VTC-2.0/model/best.ckpt",
         help="Path to a pretrained model checkpoint.",
@@ -319,6 +380,16 @@ if __name__ == "__main__":
         "--keep_raw",
         action="store_true",
         help="If active, the raw RTTM will be kept and saved to disk in the `<output>/raw_rttm/` folder and a `<output>/raw_rttm.csv` file will be created.",
+    )
+    parser.add_argument(
+        "--array_id",
+        type=int,
+        help="SLURM array task ID for distributing files across multiple GPUs.",
+    )
+    parser.add_argument(
+        "--array_count",
+        type=int,
+        help="Total number of SLURM array tasks for distributing files across multiple GPUs.",
     )
 
     args = parser.parse_args()
