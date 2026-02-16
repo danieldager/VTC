@@ -6,10 +6,12 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "kaleido>=1.2.0",
+    "matplotlib>=3.10.6",
     "nbformat>=5.10.4",
     "plotly>=6.5.2",
     "pyannote-audio>=3.4.0",
     "segma",
+    "ten-vad>=1.0.6.8",
     "tqdm>=4.67.1",
 ]
 
@@ -18,6 +20,7 @@ segma = { git = "https://github.com/arxaqapi/segma", rev = "ea8a54be363ef3ce15e0
 
 [tool.uv]
 override-dependencies = [
-    "torch==2.6.0",
-    "torchaudio==2.6.0",
+    "torch==2.9.0",
+    "torchaudio==2.9.0",
+    "torchcodec==0.9.*",
 ]

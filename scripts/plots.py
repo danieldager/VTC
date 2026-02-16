@@ -1,7 +1,6 @@
 import shutil
 from pathlib import Path
 
-import kaleido
 import plotly.graph_objects as go
 import polars as pl
 from plotly.subplots import make_subplots
