@@ -1,8 +1,29 @@
+import argparse
+import json
+import os
+import platform
+import socket
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import polars as pl
+
+
+# ---------------------------------------------------------------------------
+# Supported manifest extensions (in priority order for auto-detection)
+# ---------------------------------------------------------------------------
+
+SUPPORTED_MANIFEST_EXTENSIONS: list[str] = [
+    ".parquet",
+    ".csv",
+    ".tsv",
+    ".xlsx",
+    ".xls",
+    ".json",
+    ".jsonl",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -15,7 +36,7 @@ class DatasetPaths:
     """Standard paths derived from a dataset name.
 
     Convention:
-        manifests/{dataset}.parquet
+        manifests/{dataset}.<ext>
         output/{dataset}/
         metadata/{dataset}/
         figures/{dataset}/
@@ -28,22 +49,188 @@ class DatasetPaths:
     figures: Path
 
 
-def get_dataset_paths(dataset: str) -> DatasetPaths:
-    """Derive all standard paths from a dataset name."""
-    # Check for .parquet then .csv manifest
-    manifest = Path("manifests") / f"{dataset}.parquet"
-    if not manifest.exists():
-        csv = Path("manifests") / f"{dataset}.csv"
-        if csv.exists():
-            manifest = csv
+def resolve_manifest(manifest_arg: str) -> Path:
+    """Resolve a manifest argument to a concrete file path.
 
+    The argument can be:
+      1. A path to an existing file (absolute or relative), e.g.
+         ``/data/my_manifest.csv`` or ``manifests/chunks30.parquet``.
+      2. A bare dataset name (no path separators, no recognised extension),
+         e.g. ``chunks30``.  In this case the function searches
+         ``manifests/`` for files whose stem matches.
+
+    Raises:
+        FileNotFoundError: if no matching manifest exists.
+        ValueError:        if a bare name matches multiple files and the
+                           intended extension is ambiguous.
+    """
+    p = Path(manifest_arg)
+
+    # --- Case 1: looks like an explicit path ---
+    if (
+        "/" in manifest_arg
+        or "\\" in manifest_arg
+        or p.suffix.lower() in SUPPORTED_MANIFEST_EXTENSIONS
+    ):
+        if not p.exists():
+            raise FileNotFoundError(
+                f"Manifest file not found: {p.resolve()}\n"
+                f"Supported formats: {', '.join(SUPPORTED_MANIFEST_EXTENSIONS)}"
+            )
+        if p.suffix.lower() not in SUPPORTED_MANIFEST_EXTENSIONS:
+            raise ValueError(
+                f"Unsupported manifest format '{p.suffix}'. "
+                f"Supported: {', '.join(SUPPORTED_MANIFEST_EXTENSIONS)}"
+            )
+        return p
+
+    # --- Case 2: bare dataset name → search manifests/ ---
+    manifests_dir = Path("manifests")
+    if not manifests_dir.is_dir():
+        raise FileNotFoundError(
+            f"No 'manifests/' directory found and '{manifest_arg}' is not a "
+            f"path to an existing file."
+        )
+
+    matches = [
+        f
+        for ext in SUPPORTED_MANIFEST_EXTENSIONS
+        for f in manifests_dir.glob(f"{manifest_arg}{ext}")
+        if f.is_file()
+    ]
+
+    if len(matches) == 0:
+        raise FileNotFoundError(
+            f"No manifest found for dataset '{manifest_arg}'.\n"
+            f"Searched: manifests/{manifest_arg}.<ext> with ext in "
+            f"{SUPPORTED_MANIFEST_EXTENSIONS}"
+        )
+
+    if len(matches) == 1:
+        return matches[0]
+
+    # Multiple matches — prefer .csv (the standard normalised format)
+    csv_matches = [m for m in matches if m.suffix.lower() == ".csv"]
+    if len(csv_matches) == 1:
+        return csv_matches[0]
+
+    # Still ambiguous
+    found_list = ", ".join(str(m) for m in matches)
+    raise ValueError(
+        f"Ambiguous: multiple manifests match dataset name '{manifest_arg}':\n"
+        f"  {found_list}\n"
+        f"Please specify the full path or include the extension, e.g. "
+        f"'{matches[0]}'."
+    )
+
+
+def get_dataset_paths(dataset: str) -> DatasetPaths:
+    """Derive all standard paths from a dataset name.
+
+    The manifest is auto-detected from ``manifests/{dataset}.<ext>``.
+    When multiple formats exist, ``.csv`` is preferred (the standard
+    normalised format produced by ``normalize.py``).
+    """
     return DatasetPaths(
         dataset=dataset,
-        manifest=manifest,
+        manifest=resolve_manifest(dataset),
         output=Path("output") / dataset,
         metadata=Path("metadata") / dataset,
         figures=Path("figures") / dataset,
     )
+
+
+def validate_path_column(df: pl.DataFrame, path_col: str, manifest_path: Path) -> None:
+    """Assert that *path_col* exists in *df* and contains non-null strings.
+
+    Raises:
+        SystemExit with a helpful message listing available columns.
+    """
+    if path_col not in df.columns:
+        available = ", ".join(f"'{c}'" for c in df.columns)
+        print(
+            f"ERROR: Column '{path_col}' not found in manifest "
+            f"{manifest_path}.\n"
+            f"  Available columns: {available}\n"
+            f"  Use --path-col to specify the correct column name.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    n_null = df[path_col].null_count()
+    if n_null > 0:
+        print(
+            f"WARNING: {n_null} null value(s) in column '{path_col}'; "
+            f"those rows will be skipped.",
+            file=sys.stderr,
+        )
+
+
+def resolve_audio_paths(
+    paths: list[str],
+    audio_root: str | None = None,
+) -> list[str]:
+    """Prepend *audio_root* to relative paths.
+
+    If *audio_root* is ``None`` paths are returned as-is.  Absolute paths
+    are never modified.
+    """
+    if audio_root is None:
+        return paths
+    root = Path(audio_root)
+    if not root.is_dir():
+        print(
+            f"ERROR: --audio-root directory does not exist: {root.resolve()}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    resolved = []
+    for p in paths:
+        pp = Path(p)
+        resolved.append(str(root / pp) if not pp.is_absolute() else p)
+    return resolved
+
+
+def sample_manifest(
+    df: pl.DataFrame,
+    sample: int | float | None,
+    seed: int = 42,
+) -> pl.DataFrame:
+    """Optionally sub-sample a manifest DataFrame.
+
+    Args:
+        df:     The full manifest DataFrame.
+        sample: How many rows to keep.  Interpretation:
+                  * ``None`` → no sampling, return *df* unchanged.
+                  * ``int`` (≥ 1) → keep exactly that many rows (random).
+                  * ``float`` in (0, 1) → keep that fraction of rows.
+                Rows are sampled randomly with a fixed seed for
+                reproducibility.
+        seed:   Random seed for reproducible sampling.
+
+    Returns:
+        A (possibly smaller) DataFrame.
+    """
+    if sample is None:
+        return df
+
+    n_total = len(df)
+
+    if isinstance(sample, float) and 0 < sample < 1:
+        n_keep = max(1, int(round(n_total * sample)))
+    elif isinstance(sample, (int, float)) and sample >= 1:
+        n_keep = int(sample)
+    else:
+        raise ValueError(
+            f"Invalid --sample value: {sample!r}.  "
+            f"Use an integer ≥ 1 (number of files) or a float in (0, 1) "
+            f"(fraction of files)."
+        )
+
+    if n_keep >= n_total:
+        return df
+
+    return df.sample(n=n_keep, seed=seed)
 
 
 def shard_list(items: list, array_id: int, array_count: int) -> list:
@@ -69,18 +256,52 @@ def shard_list(items: list, array_id: int, array_count: int) -> list:
 
 
 def load_manifest(path: Path) -> pl.DataFrame:
-    """Read a manifest file (.parquet or .csv) into a Polars DataFrame."""
-    if path.suffix == ".parquet":
+    """Read a manifest file into a Polars DataFrame.
+
+    Supported formats: .parquet, .csv, .tsv, .xlsx, .xls, .json, .jsonl
+    """
+    suffix = path.suffix.lower()
+    if suffix == ".parquet":
         return pl.read_parquet(path)
-    return pl.read_csv(path)
+    if suffix == ".csv":
+        return pl.read_csv(path)
+    if suffix == ".tsv":
+        return pl.read_csv(path, separator="\t")
+    if suffix in (".xlsx", ".xls"):
+        try:
+            return pl.read_excel(path)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to read Excel file '{path}'. Make sure 'openpyxl' "
+                f"(for .xlsx) or 'xlrd' (for .xls) is installed.\n  Error: {e}"
+            ) from e
+    if suffix == ".json":
+        return pl.read_json(path)
+    if suffix == ".jsonl":
+        return pl.read_ndjson(path)
+    raise ValueError(
+        f"Unsupported manifest format '{suffix}'.  "
+        f"Supported: {', '.join(SUPPORTED_MANIFEST_EXTENSIONS)}"
+    )
 
 
 def get_task_shard(
-    manifest_path: str, array_id: int, array_count: int
+    manifest_path: str,
+    array_id: int,
+    array_count: int,
+    path_col: str = "path",
+    audio_root: str | None = None,
 ) -> tuple[int, int, list[str]]:
     """
-    Parses manifest (txt, csv, parquet) and returns (total_files, chunk_size, file_paths)
-    for the specific array task.
+    Parses manifest (txt, csv, tsv, xlsx, parquet, json, jsonl) and returns
+    (total_files, chunk_size, file_paths) for the specific array task.
+
+    Args:
+        manifest_path: Path to the manifest file.
+        array_id:      SLURM array task ID (0-based).
+        array_count:   Total number of SLURM array tasks.
+        path_col:      Name of the column containing audio file paths.
+        audio_root:    Optional root directory to prepend to relative paths.
     """
     path = Path(manifest_path)
     if not path.exists():
@@ -93,6 +314,7 @@ def get_task_shard(
         all_paths = sorted(
             [l.strip() for l in path.read_text().splitlines() if l.strip()]
         )
+        all_paths = resolve_audio_paths(all_paths, audio_root)
 
         total_files = len(all_paths)
         chunk_size = total_files // array_count
@@ -105,25 +327,27 @@ def get_task_shard(
 
         return total_files, chunk_size, all_paths[start_idx:end_idx]
 
-    elif suffix in [".parquet", ".csv"]:
-        # Use Polars
-        if suffix == ".parquet":
-            lf = pl.scan_parquet(manifest_path)
-        else:
-            lf = pl.scan_csv(manifest_path)
+    elif suffix in SUPPORTED_MANIFEST_EXTENSIONS:
+        # Load via the unified reader
+        df = load_manifest(path)
 
         # Identify path column
-        schema = lf.collect_schema()
-        if "path" in schema.names():
-            col_name = "path"
-        elif "audio_filepath" in schema.names():
+        if path_col in df.columns:
+            col_name = path_col
+        elif path_col == "path" and "audio_filepath" in df.columns:
             col_name = "audio_filepath"
         else:
+            available = ", ".join(f"'{c}'" for c in df.columns)
             raise ValueError(
-                f"Manifest {manifest_path} must contain 'path' or 'audio_filepath' column"
+                f"Column '{path_col}' not found in manifest {manifest_path}.\n"
+                f"  Available columns: {available}\n"
+                f"  Use --path-col to specify the correct column name."
             )
 
-        total_files = lf.select(pl.len()).collect().item()
+        all_paths_series = df.sort(col_name).get_column(col_name).drop_nulls().to_list()
+        all_paths_list = resolve_audio_paths(all_paths_series, audio_root)
+
+        total_files = len(all_paths_list)
         base_chunk_size = total_files // array_count
         start_idx = array_id * base_chunk_size
 
@@ -134,16 +358,14 @@ def get_task_shard(
         return (
             total_files,
             length,
-            lf.sort(col_name)
-            .slice(start_idx, length)
-            .select(col_name)
-            .collect()
-            .get_column(col_name)
-            .to_list(),
+            all_paths_list[start_idx : start_idx + length],
         )
 
     else:
-        raise ValueError(f"Unsupported manifest extension: {suffix}")
+        raise ValueError(
+            f"Unsupported manifest extension: {suffix}.  "
+            f"Supported: {', '.join(SUPPORTED_MANIFEST_EXTENSIONS + ['.txt'])}"
+        )
 
 
 def merge_segments_df(
@@ -251,3 +473,133 @@ def atomic_write_parquet(
     tmp = path.with_suffix(".parquet.tmp")
     df.write_parquet(tmp, compression=compression)  # type: ignore
     tmp.rename(path)
+
+
+# ---------------------------------------------------------------------------
+# Pipeline benchmark logging
+# ---------------------------------------------------------------------------
+
+BENCHMARK_LOG = Path("logs/benchmarks.jsonl")
+
+
+def _get_gpu_name() -> str:
+    """Best-effort GPU name (empty string if unavailable)."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return torch.cuda.get_device_name(0)
+    except Exception:
+        pass
+    return ""
+
+
+def _hardware_info(n_workers: int | None = None) -> dict:
+    """Collect hardware context for a benchmark record."""
+    return {
+        "hostname": socket.gethostname(),
+        "cpu_count": os.cpu_count() or 0,
+        "n_workers": n_workers,
+        "gpu": _get_gpu_name(),
+        "platform": platform.platform(),
+    }
+
+
+def log_benchmark(
+    step: str,
+    dataset: str,
+    n_files: int,
+    wall_seconds: float,
+    total_audio_seconds: float = 0.0,
+    total_bytes: int = 0,
+    n_workers: int | None = None,
+    extra: dict | None = None,
+) -> None:
+    """Append a benchmark record to ``logs/benchmarks.jsonl``.
+
+    Each record captures enough context to build predictive ETA models:
+    step name, dataset size in files/bytes/audio-duration, wall-time,
+    and hardware information.
+    """
+    record = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "step": step,
+        "dataset": dataset,
+        "n_files": n_files,
+        "wall_seconds": round(wall_seconds, 2),
+        "total_audio_seconds": round(total_audio_seconds, 2),
+        "total_bytes": total_bytes,
+        "files_per_second": round(n_files / wall_seconds, 2) if wall_seconds > 0 else 0,
+        "bytes_per_second": round(total_bytes / wall_seconds, 2) if wall_seconds > 0 and total_bytes > 0 else 0,
+        "hardware": _hardware_info(n_workers),
+    }
+    if extra:
+        record["extra"] = extra
+
+    BENCHMARK_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(BENCHMARK_LOG, "a") as f:
+        f.write(json.dumps(record) + "\n")
+
+
+def load_benchmarks(step: str | None = None) -> list[dict]:
+    """Read benchmark records, optionally filtered by *step*."""
+    if not BENCHMARK_LOG.exists():
+        return []
+    records = []
+    for line in BENCHMARK_LOG.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if step is None or rec.get("step") == step:
+            records.append(rec)
+    return records
+
+
+# ---------------------------------------------------------------------------
+# Argparse helpers
+# ---------------------------------------------------------------------------
+
+
+def add_sample_argument(parser) -> None:  # noqa: ANN001 (argparse.ArgumentParser)
+    """Add ``--sample`` to an argparse parser.
+
+    This is the only manifest-related argument downstream scripts need;
+    ``--manifest``, ``--path-col``, and ``--audio-root`` are handled by the
+    normalization step (``normalize.py``) before any processing begins.
+    """
+    parser.add_argument(
+        "--sample",
+        default=None,
+        type=_parse_sample,
+        metavar="N_OR_FRAC",
+        help=(
+            "Process only a random subset of the dataset (for testing).  "
+            "Pass an integer ≥ 1 to select that many files, or a float in "
+            "(0, 1) to select that fraction.  E.g. --sample 500 keeps 500 "
+            "files; --sample 0.1 keeps 10%%.  Sampling is deterministic "
+            "(seed=42) so repeated runs select the same subset."
+        ),
+    )
+
+
+def _parse_sample(value: str) -> int | float:
+    """Parse --sample value as int or float."""
+    try:
+        if "." in value:
+            f = float(value)
+            if 0 < f < 1:
+                return f
+            raise ValueError
+        n = int(value)
+        if n < 1:
+            raise ValueError
+        return n
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"Invalid sample value '{value}'.  "
+            f"Use an integer ≥ 1 (number of files) or a float in (0, 1) "
+            f"(fraction of files).  E.g. --sample 500 or --sample 0.1"
+        )

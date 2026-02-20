@@ -39,8 +39,8 @@ from segma.utils.encoders import MultiLabelEncoder
 
 logging.basicConfig(
     level=logging.INFO,
-    format="[%(asctime)s] [%(levelname)s] - %(message)s",
-    datefmt="%Y.%m.%d %H:%M:%S",
+    format="[%(asctime)s] %(message)s",
+    datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("retest")
 
@@ -89,7 +89,7 @@ def main(
         df = pl.read_csv(manifest_path)
 
     paths = df.select("path").to_series().to_list()
-    logger.info(f"Loaded {len(paths)} files from {manifest}")
+    logger.info(f"Loaded {len(paths)} files from {manifest_path.name}")
 
     # ------------------------------------------------------------------
     # Load model (once)
@@ -105,7 +105,7 @@ def main(
     model.eval()
     model.to(torch.device(device))
     labels = list(l_encoder._labels)
-    logger.info(f"Model loaded. Labels: {labels}")
+    logger.info(f"Model loaded, labels: {labels}")
 
     inference_settings = model.conv_settings
 
@@ -130,7 +130,7 @@ def main(
                 device=device,
             )
         except Exception as e:
-            logger.error(f"  Failed: {e}")
+            logger.warning(f"  Failed: {e}")
             for thresh in thresholds:
                 threshold_results.append(
                     {
@@ -161,7 +161,10 @@ def main(
         for li, label in enumerate(labels):
             max_prob = probs[:, li].max().item()
             mean_prob = probs[:, li].mean().item()
-            logger.info(f"  {label}: max={max_prob:.4f}  mean={mean_prob:.4f}")
+            logger.info(
+                f"  {label}: "
+                f"max={max_prob:.4f} mean={mean_prob:.4f}"
+            )
 
         # Sweep thresholds
         for thresh in thresholds:
@@ -187,13 +190,17 @@ def main(
                 }
             )
             logger.info(
-                f"  thresh={thresh:.2f}: {total_dur:.1f}s ({len(intervals)} intervals)"
+                f"  t={thresh:.2f}: "
+                f"{total_dur:.1f}s ({len(intervals)} intervals)"
             )
 
     # ------------------------------------------------------------------
     # Determinism test: re-run at default threshold N times
     # ------------------------------------------------------------------
-    logger.info(f"\n=== Determinism test: {repeats} repeats at threshold=0.5 ===")
+    logger.info(
+        f"\nDeterminism test: {repeats} repeats "
+        f"at threshold=0.5"
+    )
     determinism_results: list[dict] = []
 
     for rep in range(1, repeats + 1):
@@ -255,7 +262,7 @@ def main(
     results_df = pl.DataFrame(all_results)
     out_path = output_dir / "retest_results.parquet"
     results_df.write_parquet(out_path, compression="zstd")
-    logger.info(f"Saved {out_path} ({len(results_df)} rows)")
+    logger.info(f"Saved {out_path.name} ({len(results_df)} rows)")
 
     # Also write a human-readable summary
     summary_path = output_dir / "retest_summary.txt"
@@ -283,7 +290,7 @@ def main(
                     f"  *** NON-DETERMINISTIC: range={max(durs)-min(durs):.3f}s ***\n"
                 )
 
-    logger.info(f"Saved {summary_path}")
+    logger.info(f"Saved {summary_path.name}")
     logger.info("Done.")
 
 

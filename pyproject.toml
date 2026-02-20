@@ -5,15 +5,25 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "fastexcel>=0.19.0",
     "kaleido>=1.2.0",
     "matplotlib>=3.10.6",
     "nbformat>=5.10.4",
+    "openpyxl>=3.1.5",
     "plotly>=6.5.2",
     "pyannote-audio>=3.4.0",
+    "pyarrow>=23.0.1",
     "segma",
     "ten-vad>=1.0.6.8",
     "tqdm>=4.67.1",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = ["-v", "--tb=short", "-rA", "--durations=10"]
 
 [tool.uv.sources]
 segma = { git = "https://github.com/arxaqapi/segma", rev = "ea8a54be363ef3ce15e00a7252eb637dcfaac495" }
