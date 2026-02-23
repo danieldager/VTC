@@ -13,7 +13,7 @@ After normalization every downstream script can assume:
   - Audio paths are in the ``path`` column and are absolute
 
 Usage (typically called automatically from pipeline.sh):
-    python scripts/normalize.py my_data --manifest /data/meta.xlsx \\
+    python -m src.pipeline.normalize my_data --manifest /data/meta.xlsx \\
         --path-col recording_id --audio-root /store/audio/
 """
 
@@ -23,7 +23,7 @@ from pathlib import Path
 
 import polars as pl
 
-from scripts.utils import (
+from src.utils import (
     load_manifest,
     resolve_audio_paths,
     resolve_manifest,
@@ -113,9 +113,9 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python scripts/normalize.py my_data --manifest /data/meta.xlsx "
+            "  python -m src.pipeline.normalize my_data --manifest /data/meta.xlsx "
             "--path-col recording_id\n"
-            "  python scripts/normalize.py my_data --manifest metadata.csv "
+            "  python -m src.pipeline.normalize my_data --manifest metadata.csv "
             "--audio-root /store/audio/\n"
         ),
     )

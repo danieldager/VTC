@@ -22,11 +22,11 @@ Paths are derived from the dataset name:
     output/{dataset}/vad_merged/       VAD reference (read-only)
 
 Usage:
-    python scripts/vtc.py chunks30
-    python scripts/vtc.py chunks30 --target_iou 0.85
+    python -m src.pipeline.vtc chunks30
+    python -m src.pipeline.vtc chunks30 --target_iou 0.85
 
 SLURM array:
-    python scripts/vtc.py chunks30 \\
+    python -m src.pipeline.vtc chunks30 \\
         --array_id $SLURM_ARRAY_TASK_ID \\
         --array_count $SLURM_ARRAY_TASK_COUNT
 """
@@ -48,23 +48,23 @@ from segma.models import Models
 from segma.utils.encoders import MultiLabelEncoder
 from segma.utils.io import get_audio_info
 
-from scripts.core.intervals import intervals_to_segments
-from scripts.core.metadata import (
-    load_vad_reference,
+from src.core.intervals import intervals_to_segments
+from src.core.metadata import (
+    load_vad_merged,
     vtc_error_row,
     vtc_meta_row,
 )
-from scripts.core.regions import (
+from src.core.regions import (
     activity_region_coverage,
     forward_pass_full_file,
     forward_pass_regions,
     merge_into_activity_regions,
 )
-from scripts.core.thresholds import (
+from src.core.thresholds import (
     apply_default_threshold_regions,
     find_best_threshold_regions,
 )
-from scripts.utils import (
+from src.utils import (
     add_sample_argument,
     atomic_write_parquet,
     get_dataset_paths,
@@ -103,11 +103,13 @@ def main(
     target_iou: float = 0.9,
     threshold_max: float = 0.5,
     threshold_min: float = 0.1,
+    threshold_high: float = 0.9,
     threshold_step: float = 0.1,
     min_duration_on_s: float = 0.1,
     min_duration_off_s: float = 0.1,
     batch_size: int = 128,
     save_logits: bool = False,
+    no_regions: bool = False,
     device: Literal["cuda", "cpu", "mps"] = "cuda",
     array_id: int | None = None,
     array_count: int | None = None,
@@ -131,10 +133,7 @@ def main(
 
     if array_id is not None and array_count is not None:
         file_ids = shard_list(file_ids, array_id, array_count)
-        logger.info(
-            f"Shard {array_id}/{array_count - 1}: "
-            f"{len(file_ids)} files"
-        )
+        logger.info(f"Shard {array_id}/{array_count - 1}: " f"{len(file_ids)} files")
 
     shard_id = array_id if array_id is not None else 0
 
@@ -158,10 +157,7 @@ def main(
     remaining = [uid for uid in file_ids if uid not in completed_uids]
     if len(remaining) < len(file_ids):
         skipped = len(file_ids) - len(remaining)
-        logger.info(
-            f"Resume: {skipped} done, "
-            f"{len(remaining)} remaining"
-        )
+        logger.info(f"Resume: {skipped} done, " f"{len(remaining)} remaining")
     file_ids_to_process = remaining
 
     if not file_ids_to_process and not file_ids:
@@ -189,19 +185,23 @@ def main(
     # ------------------------------------------------------------------
     # Load VAD reference for adaptive thresholding
     # ------------------------------------------------------------------
-    vad_by_uid = load_vad_reference(paths.output)
+    vad_by_uid = load_vad_merged(paths.output)
     adaptive = bool(vad_by_uid)
     if adaptive:
         logger.info(
-            f"Adaptive: {len(vad_by_uid)} VAD refs, "
-            f"target IoU={target_iou}"
+            f"Adaptive: {len(vad_by_uid)} VAD refs, " f"target IoU={target_iou}"
         )
     else:
         logger.info("No VAD reference — default threshold")
 
-    # Threshold sweep list (high → low)
+    # Threshold sweep list (bidirectional from threshold_max)
+    # Upward first (reduces over-detection), then downward.
     thresholds: list[float] = []
     t = threshold_max
+    while t <= threshold_high + 1e-9:
+        thresholds.append(round(t, 4))
+        t += threshold_step
+    t = threshold_max - threshold_step
     while t >= threshold_min - 1e-9:
         thresholds.append(round(t, 4))
         t -= threshold_step
@@ -238,8 +238,7 @@ def main(
     total_bytes = sum(file_sizes.values()) or 1
     bytes_done = 0
     print(
-        f"Shard {shard_id}: {total} files, "
-        f"{total_bytes / 1e9:.1f} GB",
+        f"Shard {shard_id}: {total} files, " f"{total_bytes / 1e9:.1f} GB",
         flush=True,
     )
 
@@ -252,7 +251,7 @@ def main(
         activity_regions: list[tuple[float, float]] = []
         file_dur_s = 0.0
 
-        if adaptive and vad_pairs:
+        if not no_regions and adaptive and vad_pairs:
             try:
                 file_info = get_audio_info(audio_path)
                 file_dur_s = file_info.n_samples / 16_000
@@ -356,7 +355,8 @@ def main(
         # Log activity-region stats for the first few files
         if use_regions and i <= 5:
             cov = activity_region_coverage(
-                activity_regions, file_dur_s,
+                activity_regions,
+                file_dur_s,
             )
             logger.info(f"  {uid}")
             logger.info(
@@ -412,6 +412,16 @@ def main(
 
     meta_df = pl.concat(meta_parts) if meta_parts else pl.DataFrame()
 
+    # Guard: deduplicate by uid (race condition when shard restarts)
+    if not meta_df.is_empty():
+        before = len(meta_df)
+        meta_df = meta_df.unique(subset=["uid"], keep="last")
+        if len(meta_df) < before:
+            logger.warning(
+                f"Dedup: removed {before - len(meta_df)} duplicate "
+                f"meta rows (shard {shard_id})"
+            )
+
     # Segments
     empty_seg = pl.DataFrame(
         schema={
@@ -433,6 +443,16 @@ def main(
         seg_df = pl.concat(seg_parts) if seg_parts else empty_seg
     else:
         seg_df = new_seg_df
+
+    # Guard: deduplicate segments (same race condition)
+    if not seg_df.is_empty():
+        before = len(seg_df)
+        seg_df = seg_df.unique()
+        if len(seg_df) < before:
+            logger.warning(
+                f"Dedup: removed {before - len(seg_df)} duplicate "
+                f"segment rows (shard {shard_id})"
+            )
 
     # ------------------------------------------------------------------
     # Save outputs
@@ -462,16 +482,11 @@ def main(
     logger.info(f"  Files     : {processed}/{total}  ({n_errors} errors)")
     if adaptive and processed > 0:
         logger.info(f"  Target IoU: {n_met_target}/{processed} met")
-        valid = meta_df.filter(
-            pl.col("vtc_threshold").is_not_nan()
-        )
+        valid = meta_df.filter(pl.col("vtc_threshold").is_not_nan())
         if not valid.is_empty():
-            mean_t = valid['vtc_threshold'].mean()
-            mean_i = valid['vtc_vad_iou'].mean()
-            logger.info(
-                f"  Threshold : {mean_t:.3f} mean  "
-                f"IoU: {mean_i:.3f} mean"
-            )
+            mean_t = valid["vtc_threshold"].mean()
+            mean_i = valid["vtc_vad_iou"].mean()
+            logger.info(f"  Threshold : {mean_t:.3f} mean  " f"IoU: {mean_i:.3f} mean")
             # Compact threshold distribution on one line
             dist_parts = []
             for row in (
@@ -480,14 +495,9 @@ def main(
                 .sort("vtc_threshold", descending=True)
                 .iter_rows(named=True)
             ):
-                dist_parts.append(
-                    f"{row['vtc_threshold']:.2f}={row['len']}"
-                )
+                dist_parts.append(f"{row['vtc_threshold']:.2f}={row['len']}")
             logger.info(f"  Dist      : {', '.join(dist_parts)}")
-    logger.info(
-        f"  Segments  : {len(seg_df):,} raw, "
-        f"{len(merged_df):,} merged"
-    )
+    logger.info(f"  Segments  : {len(seg_df):,} raw, " f"{len(merged_df):,} merged")
     logger.info(f"  Wall time : {_hhmmss(wall)}")
     logger.info(f"{'─' * 50}")
 
@@ -515,9 +525,9 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python scripts/vtc.py chunks30\n"
-            "  python scripts/vtc.py chunks30 --target_iou 0.85\n"
-            "  python scripts/vtc.py chunks30 --sample 500\n"
+            "  python -m src.pipeline.vtc chunks30\n"
+            "  python -m src.pipeline.vtc chunks30 --target_iou 0.85\n"
+            "  python -m src.pipeline.vtc chunks30 --sample 500\n"
         ),
     )
     parser.add_argument(
@@ -544,13 +554,19 @@ if __name__ == "__main__":
         "--threshold_max",
         type=float,
         default=0.5,
-        help="Starting (highest) threshold (default: 0.5)",
+        help="Starting threshold for bidirectional sweep (default: 0.5)",
     )
     parser.add_argument(
         "--threshold_min",
         type=float,
         default=0.1,
-        help="Minimum threshold to sweep to (default: 0.1)",
+        help="Minimum threshold to sweep down to (default: 0.1)",
+    )
+    parser.add_argument(
+        "--threshold_high",
+        type=float,
+        default=0.9,
+        help="Maximum threshold to sweep up to (default: 0.9)",
     )
     parser.add_argument(
         "--threshold_step",
@@ -580,6 +596,11 @@ if __name__ == "__main__":
         "--save_logits",
         action="store_true",
         help="Save per-file logits to output/{dataset}/logits/",
+    )
+    parser.add_argument(
+        "--no_regions",
+        action="store_true",
+        help="Disable activity-region optimization; always run VTC on full files.",
     )
     parser.add_argument(
         "--device",

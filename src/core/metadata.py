@@ -7,7 +7,7 @@ from pathlib import Path
 
 import polars as pl
 
-from scripts.core.intervals import merge_pairs
+from src.core.intervals import merge_pairs
 
 
 # ---------------------------------------------------------------------------
@@ -66,7 +66,7 @@ def vtc_meta_row(
 # ---------------------------------------------------------------------------
 
 
-def load_vad_reference(
+def load_vad_merged(
     output_dir: Path,
 ) -> dict[str, list[tuple[float, float]]]:
     """Load merged VAD segments and return ``{uid: [(onset, offset), ...]}``.

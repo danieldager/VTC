@@ -26,7 +26,7 @@ export PYTHONPATH=$PYTHONPATH:$(pwd)
 export POLARS_SKIP_CPU_CHECK=1
 
 PYTHONUNBUFFERED=1 \
-uv run scripts/compare.py "$DATASET" \
+uv run src/pipeline/compare.py "$DATASET" \
     "$@"
 
 EXIT_CODE=$?

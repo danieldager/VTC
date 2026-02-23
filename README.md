@@ -51,15 +51,9 @@ pip install -r requirements.txt
 Run the model on a folder of WAV files (16 kHz, mono):
 
 ```bash
-uv run scripts/vtc.py my_data \
+uv run python -m src.pipeline.vtc my_data \
     --manifest my_audios/ \
     --device cuda
-```
-
-If your audio is not 16 kHz mono, convert it first:
-
-```bash
-uv run scripts/convert.py --wavs raw_audio/ --output converted_audio/
 ```
 
 ### Full pipeline on a SLURM cluster
@@ -68,16 +62,16 @@ Process an entire dataset end-to-end (VAD → VTC → comparison metrics):
 
 ```bash
 # First run with a custom manifest:
-bash scripts/pipeline.sh my_data \
+bash slurm/pipeline.sh my_data \
     --manifest /data/recordings.xlsx \
     --path-col audio_path \
     --audio-root /store/audio/
 
 # Subsequent runs (manifest already normalized):
-bash scripts/pipeline.sh my_data
+bash slurm/pipeline.sh my_data
 ```
 
-This submits three chained SLURM jobs with automatic dependency handling. See the [Pipeline](#3-pipeline) section and the [pipeline reference](scripts/README.md) for full documentation.
+This submits three chained SLURM jobs with automatic dependency handling. See the [Pipeline](#3-pipeline) section for full documentation.
 
 ---
 
@@ -85,11 +79,11 @@ This submits three chained SLURM jobs with automatic dependency handling. See th
 
 The pipeline runs three steps, each as a SLURM job:
 
-| Step | Script | Resource | Description |
+| Step | Module | Resource | Description |
 |------|--------|----------|-------------|
-| **1. VAD** | `scripts/vad.py` | 48 CPUs | TenVAD speech detection (multiprocessed, ~31 MB/worker) |
-| **2. VTC** | `scripts/vtc.py` | 4× GPU | VTC-2.0 inference with adaptive per-file thresholding |
-| **3. Compare** | `scripts/compare.py` | 8 CPUs | Per-file IoU / Precision / Recall + diagnostic figures |
+| **1. VAD** | `src.pipeline.vad` | 48 CPUs | TenVAD speech detection (multiprocessed, ~31 MB/worker) |
+| **2. VTC** | `src.pipeline.vtc` | 4× GPU | VTC-2.0 inference with adaptive per-file thresholding |
+| **3. Compare** | `src.pipeline.compare` | 8 CPUs | Per-file IoU / Precision / Recall + diagnostic figures |
 
 **Adaptive thresholding:** The VTC model was trained on child-directed speech. For out-of-distribution audio (e.g., audiobook narrators), the default 0.5 sigmoid threshold can miss speech that the model does partially detect. Step 2 uses VAD output to automatically lower the threshold per file until VTC–VAD agreement reaches 90% IoU.
 
@@ -97,30 +91,20 @@ The pipeline runs three steps, each as a SLURM job:
 
 **Resume support:** Both VAD and VTC save checkpoints. Interrupted jobs can be resubmitted and will skip already-completed files.
 
-Full CLI reference, SLURM parameters, data flow, and core module documentation: **[scripts/README.md](scripts/README.md)**
-
 ---
 
 ## 4. Project Structure
 
 ```
 VTC/
-├── scripts/
-│   ├── pipeline.sh          # One-command pipeline orchestrator
-│   ├── vad.py               # Step 1: Voice activity detection (CLI)
-│   ├── vtc.py               # Step 2: VTC inference (CLI)
-│   ├── compare.py           # Step 3: VAD vs VTC comparison (CLI)
-│   ├── convert.py           # Audio format conversion utility
-│   ├── normalize.py         # Manifest normalization utility
-│   ├── preflight.py         # Pre-pipeline dataset scan
-│   ├── retest.py            # Threshold sweep / determinism testing
-│   ├── plots.py             # Interactive Plotly dashboard
+├── src/
 │   ├── utils.py             # Shared utilities (manifest I/O, paths, logging)
-│   ├── vad.slurm            # SLURM: VAD (CPU, 48 workers)
-│   ├── vtc.slurm            # SLURM: VTC (GPU array, 4 shards)
-│   ├── compare.slurm        # SLURM: Compare (CPU)
-│   ├── test.slurm           # SLURM: pytest on compute node
-│   ├── README.md            # Full pipeline reference & failure analysis
+│   ├── pipeline/            # CLI entry points (one per pipeline step)
+│   │   ├── vad.py           #   Step 1: Voice activity detection
+│   │   ├── vtc.py           #   Step 2: VTC inference
+│   │   ├── compare.py       #   Step 3: VAD vs VTC comparison
+│   │   ├── normalize.py     #   Manifest normalization
+│   │   └── preflight.py     #   Pre-pipeline dataset scan
 │   └── core/                # Reusable, tested modules
 │       ├── intervals.py     #   Interval arithmetic (merge, IoU)
 │       ├── regions.py       #   Activity-region optimization
@@ -129,8 +113,15 @@ VTC/
 │       ├── parallel.py      #   Process pool driver with progress queue
 │       ├── checkpoint.py    #   Checkpoint save / resume
 │       └── metadata.py      #   VTC metadata constructors
-├── tests/                   # 82 pytest tests covering all core modules
+├── slurm/
+│   ├── pipeline.sh          # One-command pipeline orchestrator
+│   ├── vad.slurm            # SLURM: VAD (CPU, 48 workers)
+│   ├── vtc.slurm            # SLURM: VTC (GPU array, 4 shards)
+│   ├── compare.slurm        # SLURM: Compare (CPU)
+│   └── test.slurm           # SLURM: pytest on compute node
+├── tests/                   # pytest suite covering all core modules
 │   ├── conftest.py          #   Stitched audio fixtures
+│   ├── fixtures/            #   Synthetic WAV files (committed)
 │   ├── test_intervals.py
 │   ├── test_regions.py
 │   ├── test_checkpoint.py
@@ -147,7 +138,6 @@ VTC/
 ├── metadata/                # Per-file statistics (per-dataset subdirs)
 ├── figures/                 # Diagnostic plots (per-dataset subdirs)
 ├── logs/                    # SLURM logs + benchmark records
-├── data/                    # Sample audio for testing
 ├── pyproject.toml           # Python project config (uv / pip)
 ├── requirements.txt         # Pinned dependency lockfile
 └── check_sys_dependencies.sh
@@ -166,11 +156,11 @@ manifests/{dataset}.csv  →  output/{dataset}/   (segments, metrics, figures)
 ### Running tests
 
 ```bash
-# Login node (71/82 — TenVAD tests auto-skip):
+# Login node (TenVAD tests auto-skip):
 uv run python3 -m pytest tests/
 
-# Compute node (all 82):
-sbatch scripts/test.slurm
+# Compute node (full suite):
+sbatch slurm/test.slurm
 ```
 
 ---

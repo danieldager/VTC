@@ -1,4 +1,4 @@
-"""Tests for scripts.core.vad_processing — VAD helpers and single-file processing."""
+"""Tests for src.core.vad_processing — VAD helpers and single-file processing."""
 
 from __future__ import annotations
 
@@ -9,13 +9,13 @@ import pytest
 
 from tests.conftest import requires_tenvad
 
-from scripts.core.vad_processing import (
+from src.core.vad_processing import (
     get_runs,
     resample_block,
     runs_to_segments,
     segment_stats,
     vad_error_metadata,
-    process_file,
+    process_vad_file,
 )
 
 
@@ -174,7 +174,7 @@ class TestVadErrorMetadata:
 
 
 # ---------------------------------------------------------------------------
-# process_file  (integration: requires real audio)
+# process_vad_file  (integration: requires real audio)
 # ---------------------------------------------------------------------------
 
 
@@ -183,7 +183,7 @@ class TestProcessFile:
     def test_on_good_book_file(self, good_book_wavs: list[Path]):
         """End-to-end test on a real short audio file."""
         wav = good_book_wavs[0]
-        meta, segs = process_file((wav, 256, 0.5))
+        meta, segs = process_vad_file((wav, 256, 0.5))
         assert meta["success"] is True
         assert meta["duration"] > 0
         assert meta["file_id"] == wav.stem
@@ -197,13 +197,13 @@ class TestProcessFile:
     def test_on_short_fail_file(self, short_fail_wavs: list[Path]):
         """Short files should still process without error."""
         wav = short_fail_wavs[0]
-        meta, segs = process_file((wav, 256, 0.5))
+        meta, segs = process_vad_file((wav, 256, 0.5))
         assert meta["success"] is True
         assert meta["duration"] > 0
 
     def test_nonexistent_file(self, tmp_path: Path):
         """Nonexistent file should return error metadata, not raise."""
-        meta, segs = process_file((tmp_path / "nope.wav", 256, 0.5))
+        meta, segs = process_vad_file((tmp_path / "nope.wav", 256, 0.5))
         assert meta["success"] is False
         assert "error" in meta
         assert segs == []

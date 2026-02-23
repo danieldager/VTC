@@ -7,7 +7,7 @@ vtc_merged), computes per-file IoU / Precision / Recall, generates matplotlib
 figures, and merges VTC per-file metadata into the VAD metadata file.
 
 Usage:
-    python scripts/compare.py chunks30
+    python -m src.pipeline.compare chunks30
 """
 
 import argparse
@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 
-from scripts.utils import atomic_write_parquet, get_dataset_paths
+from src.utils import atomic_write_parquet, get_dataset_paths
 
 
 # ---------------------------------------------------------------------------
@@ -435,7 +435,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Compare VAD and VTC pipeline outputs.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=("Examples:\n" "  python scripts/compare.py chunks30\n"),
+        epilog=("Examples:\n" "  python -m src.pipeline.compare chunks30\n"),
     )
     parser.add_argument(
         "dataset",

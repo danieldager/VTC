@@ -1,18 +1,21 @@
-"""Tests for scripts.core.regions — activity-region construction."""
+"""Tests for src.core.regions — activity-region construction."""
 
 from __future__ import annotations
 
 import pytest
 
-pytest.importorskip(
-    "torchcodec",
-    reason="torchcodec/ffmpeg not available — run via scripts/test.slurm on a compute node",
-)
+from tests.conftest import _TORCHCODEC_OK, requires_torchcodec
 
-from scripts.core.regions import (
-    activity_region_coverage,
-    merge_into_activity_regions,
-)
+if not _TORCHCODEC_OK:
+    pytestmark = requires_torchcodec
+    # Provide stubs so the module can be collected without import errors.
+    merge_into_activity_regions = None  # type: ignore[assignment]
+    activity_region_coverage = None  # type: ignore[assignment]
+else:
+    from src.core.regions import (
+        activity_region_coverage,
+        merge_into_activity_regions,
+    )
 
 
 # ---------------------------------------------------------------------------

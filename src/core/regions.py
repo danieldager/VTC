@@ -17,7 +17,7 @@ import torch
 from segma.inference import Chunkyfier, apply_model_on_audio, prepare_audio
 from segma.models.base import BaseSegmentationModel, ConvolutionSettings
 
-from scripts.core.intervals import merge_pairs
+from src.core.intervals import merge_pairs
 
 # segma's minimum tail length — shorter regions produce no model output.
 _MIN_REGION_SAMPLES = 400

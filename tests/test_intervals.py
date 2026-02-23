@@ -1,10 +1,10 @@
-"""Tests for scripts.core.intervals — pure interval arithmetic."""
+"""Tests for src.core.intervals — pure interval arithmetic."""
 
 from __future__ import annotations
 
 import pytest
 
-from scripts.core.intervals import (
+from src.core.intervals import (
     compute_iou,
     intervals_to_pairs,
     intervals_to_segments,

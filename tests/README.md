@@ -1,6 +1,6 @@
 # VTC Test Suite
 
-Tests for the `scripts/core/` modules. Covers pure interval arithmetic, VAD
+Tests for the `src/core/` modules. Covers pure interval arithmetic, VAD
 processing helpers, activity-region logic, checkpoint I/O, metadata row
 construction, parallel VAD execution, and end-to-end VAD on stitched long-form
 audio fixtures.
@@ -15,28 +15,27 @@ audio fixtures.
 uv run python3 -m pytest tests/
 ```
 
-71 of 82 tests run. The 11 that require TenVAD are automatically skipped with a
-clear message. Suitable for quick sanity checks after code changes — runs in
-~6 seconds.
+Tests that require TenVAD are automatically skipped with a
+clear message. Suitable for quick sanity checks after code changes.
 
 ### On a compute node via SLURM (full)
 
 ```bash
-sbatch scripts/test.slurm
+sbatch slurm/test.slurm
 ```
 
-All 82 tests run. Logs land in `logs/tests/pytest_<jobid>.out`. Runs on any
+All tests run. Logs land in `logs/tests/pytest_<jobid>.out`. Runs on any
 `erc-dupoux`, `gpu-p1`, or `gpu-p2` node (no GPU required — TenVAD is
-CPU-only). Takes ~90 seconds end-to-end.
+CPU-only).
 
 Pass extra pytest flags through with `"$@"`:
 
 ```bash
 # Stop after first failure
-sbatch scripts/test.slurm -x
+sbatch slurm/test.slurm -x
 
 # Run only a specific file
-sbatch scripts/test.slurm tests/test_vad_processing.py
+sbatch slurm/test.slurm tests/test_vad_processing.py
 ```
 
 ---
@@ -51,11 +50,26 @@ erroring out when the library is unavailable.
 
 ---
 
+## Test fixtures
+
+Synthetic WAV files are committed under `tests/fixtures/` so the test suite
+runs without access to external datasets:
+
+| Directory | Contents |
+|---|---|
+| `tests/fixtures/good_book/` | 6 synthetic ~5 s chunks (sine + noise, 16 kHz mono) |
+| `tests/fixtures/short_fail/` | 1 very short (~0.3 s) noise file |
+
+The `stitched_audio_dir` session fixture in `conftest.py` concatenates these
+chunks with configurable silence gaps to create long-form test recordings.
+
+---
+
 ## Test files
 
 ### `test_intervals.py` — Pure interval arithmetic
 
-Tests `scripts/core/intervals.py`, which is the mathematical foundation of
+Tests `src/core/intervals.py`, which is the mathematical foundation of
 adaptive thresholding. Every threshold decision in the pipeline ultimately goes
 through `compute_iou`, so correctness here is critical.
 
@@ -71,7 +85,7 @@ through `compute_iou`, so correctness here is critical.
 
 ### `test_regions.py` — Activity-region construction
 
-Tests `scripts/core/regions.py`. Requires `torchcodec`/FFmpeg to import (skips
+Tests `src/core/regions.py`. Requires `torchcodec`/FFmpeg to import (skips
 the whole module if unavailable at collection time). The tests themselves only
 exercise the pure-Python `merge_into_activity_regions` and
 `activity_region_coverage` functions — no model is loaded.
@@ -85,9 +99,9 @@ exercise the pure-Python `merge_into_activity_regions` and
 
 ### `test_vad_processing.py` — VAD helper functions
 
-Tests `scripts/core/vad_processing.py`. The pure-logic tests (flag parsing,
+Tests `src/core/vad_processing.py`. The pure-logic tests (flag parsing,
 segment conversion, resampling, error metadata) run on the login node. The
-`process_file` integration tests require TenVAD.
+`process_vad_file` integration tests require TenVAD.
 
 | Test class | What it verifies | TenVAD? |
 |---|---|---|
@@ -102,7 +116,7 @@ segment conversion, resampling, error metadata) run on the login node. The
 
 ### `test_checkpoint.py` — Resumable checkpoint I/O
 
-Tests `scripts/core/checkpoint.py`. These protect the resume logic: an
+Tests `src/core/checkpoint.py`. These protect the resume logic: an
 interrupted run writes a checkpoint; on restart it is loaded and completed files
 are skipped.
 
@@ -115,7 +129,7 @@ are skipped.
 
 ### `test_metadata.py` — VTC output row builders
 
-Tests `scripts/core/metadata.py`. These validate the contract between the VTC
+Tests `src/core/metadata.py`. These validate the contract between the VTC
 inference loop and the output parquet files.
 
 | Test class | What it verifies |
@@ -128,7 +142,7 @@ inference loop and the output parquet files.
 
 ### `test_parallel.py` — Parallel VAD driver
 
-Tests `scripts/core/parallel.py`. Requires TenVAD.
+Tests `src/core/parallel.py`. Requires TenVAD.
 
 | Test | What it verifies |
 |---|---|
@@ -140,12 +154,12 @@ Tests `scripts/core/parallel.py`. Requires TenVAD.
 
 ### `test_stitched_audio.py` — Long-form audio fixtures + end-to-end integration
 
-Tests `scripts/core/vad_processing.py` and `scripts/core/regions.py` together on
+Tests `src/core/vad_processing.py` and `src/core/regions.py` together on
 realistic long-form audio. Requires `torchcodec`/FFmpeg to import; TenVAD tests
 within are additionally gated with `@requires_tenvad`.
 
 **Fixtures** (`conftest.py`): Three audio files are synthesised once per test
-session by stitching real audiobook chunks from `data/vtc_samples/` with silence:
+session by stitching synthetic chunks from `tests/fixtures/` with silence:
 
 | File | Construction | Speech ratio |
 |---|---|---|
@@ -169,8 +183,8 @@ A `test_manifest.csv` containing paths to all three is also written.
   once and returns the temp directory. All stitched-audio tests share this fixture
   without re-creating files.
 - **`good_book_wavs`** / **`short_fail_wavs`** (`scope="session"`): sorted lists
-  of WAV paths from `data/vtc_samples/`. Tests skip if the source directory is
+  of WAV paths from `tests/fixtures/`. Tests skip if the fixture directory is
   empty.
 - **`requires_tenvad`**: `pytest.mark.skipif` marker applied to any test or class
-  that calls `process_file` or `run_vad_parallel`. Skips with a human-readable
+  that calls `process_vad_file` or `run_vad_parallel`. Skips with a human-readable
   reason rather than an import error.

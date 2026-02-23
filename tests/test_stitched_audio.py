@@ -8,18 +8,19 @@ import polars as pl
 import pytest
 import soundfile as sf
 
-pytest.importorskip(
-    "torchcodec",
-    reason="torchcodec/ffmpeg not available — run via scripts/test.slurm on a compute node",
-)
+from tests.conftest import _TORCHCODEC_OK, requires_tenvad, requires_torchcodec
 
-from scripts.core.regions import (
-    activity_region_coverage,
-    merge_into_activity_regions,
-)
-from tests.conftest import requires_tenvad
-
-from scripts.core.vad_processing import process_file
+if not _TORCHCODEC_OK:
+    pytestmark = requires_torchcodec
+    merge_into_activity_regions = None  # type: ignore[assignment]
+    activity_region_coverage = None  # type: ignore[assignment]
+    process_vad_file = None  # type: ignore[assignment]
+else:
+    from src.core.regions import (
+        activity_region_coverage,
+        merge_into_activity_regions,
+    )
+    from src.core.vad_processing import process_vad_file
 
 
 class TestStitchedFixtures:
@@ -58,7 +59,7 @@ class TestVadOnStitchedAudio:
     def test_low_speech_ratio(self, stitched_audio_dir: Path):
         """Low-speech file should have a speech ratio below 50%."""
         wav = stitched_audio_dir / "audio" / "long_low_speech.wav"
-        meta, segs = process_file((wav, 256, 0.5))
+        meta, segs = process_vad_file((wav, 256, 0.5))
         assert meta["success"] is True
         assert meta["speech_ratio"] < 0.5
         assert meta["n_speech_segments"] > 0
@@ -67,8 +68,8 @@ class TestVadOnStitchedAudio:
         """Dense file (5s gaps) should have a higher speech ratio than sparse file (60s gaps)."""
         low_wav = stitched_audio_dir / "audio" / "long_low_speech.wav"
         high_wav = stitched_audio_dir / "audio" / "long_high_speech.wav"
-        low_meta, _ = process_file((low_wav, 256, 0.5))
-        high_meta, _ = process_file((high_wav, 256, 0.5))
+        low_meta, _ = process_vad_file((low_wav, 256, 0.5))
+        high_meta, _ = process_vad_file((high_wav, 256, 0.5))
         assert high_meta["success"] is True
         assert high_meta["speech_ratio"] > low_meta["speech_ratio"], (
             f"Dense file ratio {high_meta['speech_ratio']:.3f} should exceed "
@@ -77,7 +78,7 @@ class TestVadOnStitchedAudio:
 
     def test_short_file_no_error(self, stitched_audio_dir: Path):
         wav = stitched_audio_dir / "audio" / "short_file.wav"
-        meta, segs = process_file((wav, 256, 0.5))
+        meta, segs = process_vad_file((wav, 256, 0.5))
         assert meta["success"] is True
 
 
@@ -88,7 +89,7 @@ class TestActivityRegionsOnStitched:
     def test_low_speech_has_multiple_regions(self, stitched_audio_dir: Path):
         """Low-speech file: VAD segments → activity regions should cover < 90 %."""
         wav = stitched_audio_dir / "audio" / "long_low_speech.wav"
-        meta, segs = process_file((wav, 256, 0.5))
+        meta, segs = process_vad_file((wav, 256, 0.5))
         assert meta["success"] is True
 
         file_dur = meta["duration"]
@@ -109,7 +110,7 @@ class TestActivityRegionsOnStitched:
         high_wav = stitched_audio_dir / "audio" / "long_high_speech.wav"
 
         def get_coverage(wav: Path) -> float:
-            meta, segs = process_file((wav, 256, 0.5))
+            meta, segs = process_vad_file((wav, 256, 0.5))
             assert meta["success"] is True
             vad_pairs = [(s["onset"], s["offset"]) for s in segs]
             regions = merge_into_activity_regions(vad_pairs, meta["duration"])

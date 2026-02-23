@@ -11,14 +11,14 @@
 #  dataset name.
 #
 #  Usage:
-#    bash scripts/pipeline.sh [DATASET] [OPTIONS]
+#    bash slurm/pipeline.sh [DATASET] [OPTIONS]
 #
 #  First run (non-standard manifest):
-#    bash scripts/pipeline.sh my_data --manifest /data/meta.xlsx \
+#    bash slurm/pipeline.sh my_data --manifest /data/meta.xlsx \
 #        --path-col recording_id --audio-root /store/audio/
 #
 #  Subsequent runs:
-#    bash scripts/pipeline.sh my_data
+#    bash slurm/pipeline.sh my_data
 #
 #  Positional:
 #    DATASET          Dataset name (default: "chunks30").  Used to derive
@@ -125,7 +125,7 @@ if [ "$NEEDS_NORMALIZE" = true ]; then
     [ "$PATH_COL" != "path" ] && NORM_ARGS="$NORM_ARGS --path-col $PATH_COL"
     [ -n "$AUDIO_ROOT" ]     && NORM_ARGS="$NORM_ARGS --audio-root $AUDIO_ROOT"
 
-    PYTHONPATH="${PYTHONPATH:-}:$(pwd)" uv run python3 scripts/normalize.py $NORM_ARGS
+    PYTHONPATH="${PYTHONPATH:-}:$(pwd)" uv run python3 src/pipeline/normalize.py $NORM_ARGS
     if [ $? -ne 0 ]; then
         echo "ERROR: Manifest normalization failed." >&2
         exit 1
@@ -133,7 +133,7 @@ if [ "$NEEDS_NORMALIZE" = true ]; then
 else
     # Validate that the manifest exists for this dataset
     PYTHONPATH="${PYTHONPATH:-}:$(pwd)" uv run python3 -c "
-from scripts.utils import resolve_manifest
+from src.utils import resolve_manifest
 import sys
 try:
     p = resolve_manifest('${DATASET}')
@@ -151,7 +151,7 @@ fi
 # STEP 0b — Preflight: dataset summary & ETA estimate
 # ==========================================================================
 echo ""
-PYTHONPATH="${PYTHONPATH:-}:$(pwd)" uv run python3 scripts/preflight.py "$DATASET" \
+PYTHONPATH="${PYTHONPATH:-}:$(pwd)" uv run python3 src/pipeline/preflight.py "$DATASET" \
     --vtc-tasks "$VTC_ARRAY_COUNT" \
     --vad-workers 48 \
     $EXTRA_ARGS
@@ -162,7 +162,7 @@ echo ""
 # ---------- Step 1: VAD ---------------------------------------------------
 
 VAD_JOB=$(sbatch --parsable \
-    scripts/vad.slurm "$DATASET" $EXTRA_ARGS)
+    slurm/vad.slurm "$DATASET" $EXTRA_ARGS)
 
 echo "  VAD     : $VAD_JOB"
 
@@ -173,7 +173,7 @@ ARRAY_SPEC="0-$((VTC_ARRAY_COUNT - 1))"
 VTC_JOB=$(sbatch --parsable \
     --dependency=afterok:${VAD_JOB} \
     --array="${ARRAY_SPEC}" \
-    scripts/vtc.slurm "$DATASET" \
+    slurm/vtc.slurm "$DATASET" \
         --target_iou "$TARGET_IOU" \
         --threshold_min "$THRESHOLD_MIN" \
         --threshold_step "$THRESHOLD_STEP" \
@@ -185,7 +185,7 @@ echo "  VTC     : $VTC_JOB  (array ${ARRAY_SPEC})"
 
 CMP_JOB=$(sbatch --parsable \
     --dependency=afterok:${VTC_JOB} \
-    scripts/compare.slurm "$DATASET")
+    slurm/compare.slurm "$DATASET")
 
 echo "  Compare : $CMP_JOB"
 echo ""

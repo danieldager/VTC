@@ -9,8 +9,8 @@ All paths derived from the dataset name:
     output/{dataset}/vad_merged/         merged VAD segments
 
 Usage:
-    python scripts/vad.py chunks30
-    python scripts/vad.py chunks30 --sample 500
+    python -m src.pipeline.vad chunks30
+    python -m src.pipeline.vad chunks30 --sample 500
 """
 
 import argparse
@@ -25,10 +25,10 @@ import polars as pl
 warnings.filterwarnings("ignore", message=".*In 2.9.*")
 warnings.filterwarnings("ignore", message=".*StreamingMediaDecoder.*")
 
-from scripts.core.checkpoint import CKPT_META, CKPT_SEGS, clear_checkpoint
-from scripts.core.parallel import run_vad_parallel
-from scripts.core.vad_processing import set_seeds
-from scripts.utils import (
+from src.core.checkpoint import CKPT_META, CKPT_SEGS, clear_checkpoint
+from src.core.parallel import run_vad_parallel
+from src.core.vad_processing import set_seeds
+from src.utils import (
     add_sample_argument,
     atomic_write_parquet,
     get_dataset_paths,
@@ -45,8 +45,8 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python scripts/vad.py chunks30\n"
-            "  python scripts/vad.py chunks30 --sample 500\n"
+            "  python -m src.pipeline.vad chunks30\n"
+            "  python -m src.pipeline.vad chunks30 --sample 500\n"
         ),
     )
     parser.add_argument(
@@ -61,6 +61,11 @@ def main() -> None:
         type=int,
         default=None,
         help="Parallel workers (default: all CPUs)",
+    )
+    parser.add_argument(
+        "--save_logits",
+        action="store_true",
+        help="Save raw per-frame speech probabilities (.npz) for re-thresholding.",
     )
     add_sample_argument(parser)
     args = parser.parse_args()
@@ -150,6 +155,12 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Run VAD
     # ------------------------------------------------------------------
+    save_probs_dir = None
+    if args.save_logits:
+        save_probs_dir = ds.output / "vad_probs"
+        save_probs_dir.mkdir(parents=True, exist_ok=True)
+        print(f"  probs    : {save_probs_dir}")
+
     t0_wall = time.time()
     if wavs:
         meta_rows, seg_rows = run_vad_parallel(
@@ -158,6 +169,7 @@ def main() -> None:
             args.threshold,
             workers,
             checkpoint_dir=out_dir,
+            save_probs_dir=save_probs_dir,
         )
     else:
         print("  All files processed. Regenerating outputs.")

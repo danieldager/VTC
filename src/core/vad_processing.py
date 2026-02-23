@@ -35,6 +35,7 @@ def set_seeds(seed: int = 42) -> None:
     np.random.seed(seed)
     try:
         import torch
+
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
@@ -150,7 +151,7 @@ def vad_error_metadata(path: str, error: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def process_file(args: tuple) -> tuple[dict, list[dict]]:
+def process_vad_file(args: tuple) -> tuple[dict, list[dict]]:
     """Process one WAV file using soundfile block streaming.
 
     ``soundfile.blocks()`` yields fixed-size numpy arrays directly from
@@ -159,11 +160,16 @@ def process_file(args: tuple) -> tuple[dict, list[dict]]:
     Peak memory per worker ≈ ``_BLOCK_SAMPLES × 2`` bytes + TenVAD overhead
     ≈ 19 MB for 10-minute blocks at 16 kHz.
 
+    If a *save_probs_dir* path is provided (5th element of *args*), the
+    raw per-frame speech probabilities are saved as a compressed ``.npz``
+    file alongside the hop_size, enabling dynamic re-thresholding later.
+
     Returns ``(metadata_row, segment_rows)`` where ``segment_rows`` is a
     list of dicts each containing ``file_id, onset, offset, duration``.
     """
     wav_path, hop_size, threshold = args[:3]
     progress_q = args[3] if len(args) > 3 else None
+    save_probs_dir = args[4] if len(args) > 4 else None
     file_id_early = Path(wav_path).stem
 
     try:
@@ -173,6 +179,7 @@ def process_file(args: tuple) -> tuple[dict, list[dict]]:
 
     try:
         all_flags: list[np.ndarray] = []
+        all_probs: list[np.ndarray] = []
         total_samples = 0
         proc = vad.process
         original_sr: int = TARGET_SR
@@ -205,13 +212,27 @@ def process_file(args: tuple) -> tuple[dict, list[dict]]:
                 if n_vad_frames == 0:
                     continue
                 frames = data[: n_vad_frames * hop_size].reshape(-1, hop_size)
+                probs = np.empty(n_vad_frames, dtype=np.float32)
                 flags = np.empty(n_vad_frames, dtype=np.uint8)
                 for i in range(n_vad_frames):
-                    _, flags[i] = proc(frames[i])
+                    probs[i], flags[i] = proc(frames[i])
                 all_flags.append(flags)
+                if save_probs_dir is not None:
+                    all_probs.append(probs)
 
         flags = np.concatenate(all_flags) if all_flags else np.array([], dtype=np.uint8)
         duration = round(total_samples / TARGET_SR, 3)
+
+        # Save raw probabilities for dynamic re-thresholding
+        if save_probs_dir is not None and all_probs:
+            prob_arr = np.concatenate(all_probs)
+            file_id_p = Path(wav_path).stem
+            np.savez_compressed(
+                Path(save_probs_dir) / f"{file_id_p}-probs.npz",
+                probs=prob_arr,
+                hop_size=np.array(hop_size, dtype=np.int32),
+                sr=np.array(TARGET_SR, dtype=np.int32),
+            )
 
         speech_runs, silence_runs = get_runs(flags)
         speech_segs = runs_to_segments(speech_runs, hop_size, TARGET_SR)

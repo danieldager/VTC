@@ -1,8 +1,11 @@
 """Shared fixtures for the VTC test suite.
 
-Session-scoped fixtures create stitched audio files that combine real
-audiobook chunks with silence to simulate long-form recordings with
-realistic (low) speech ratios.
+Session-scoped fixtures create stitched audio files that combine synthetic
+WAV chunks (committed under ``tests/fixtures/``) with silence to simulate
+long-form recordings with realistic (low) speech ratios.
+
+No external data (e.g. ``data/vtc_samples/``) is needed — the synthetic
+chunks are small enough to live in the repository.
 """
 
 from __future__ import annotations
@@ -16,22 +19,30 @@ import pytest
 import soundfile as sf
 
 # ---------------------------------------------------------------------------
-# Paths
+# Paths — all fixtures are committed under tests/fixtures/
 # ---------------------------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-GOOD_BOOK = PROJECT_ROOT / "data" / "vtc_samples" / "good_book"
-SHORT_FAIL = PROJECT_ROOT / "data" / "vtc_samples" / "short_fail"
 FIXTURE_DIR = PROJECT_ROOT / "tests" / "fixtures"
-AUDIO_DIR = FIXTURE_DIR / "audio"
-MANIFEST_PATH = FIXTURE_DIR / "test_manifest.csv"
+GOOD_BOOK = FIXTURE_DIR / "good_book"
+SHORT_FAIL = FIXTURE_DIR / "short_fail"
 
 SR = 16_000
 
 
 # ---------------------------------------------------------------------------
-# TenVAD availability check
+# Availability checks
 # ---------------------------------------------------------------------------
+
+
+def _torchcodec_available() -> bool:
+    """Return True if torchcodec can load (requires FFmpeg libs)."""
+    try:
+        import torchcodec  # noqa: F401
+
+        return True
+    except Exception:
+        return False
 
 
 def _tenvad_available() -> bool:
@@ -46,11 +57,17 @@ def _tenvad_available() -> bool:
         return False
 
 
+_TORCHCODEC_OK = _torchcodec_available()
 _TENVAD_OK = _tenvad_available()
+
+requires_torchcodec = pytest.mark.skipif(
+    not _TORCHCODEC_OK,
+    reason="torchcodec/ffmpeg not available — run via slurm/test.slurm on a compute node",
+)
 
 requires_tenvad = pytest.mark.skipif(
     not _TENVAD_OK,
-    reason="TenVAD unavailable (needs 'module load llvm' for libc++.so.1) — run via scripts/test.slurm",
+    reason="TenVAD unavailable (needs 'module load llvm' for libc++.so.1) — run via slurm/test.slurm",
 )
 
 
@@ -140,9 +157,9 @@ def stitched_audio_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     short_wavs = sorted(SHORT_FAIL.glob("*.wav"))
 
     if not good_wavs:
-        pytest.skip("No test audio in data/vtc_samples/good_book/")
+        pytest.skip("No test audio in tests/fixtures/good_book/")
     if not short_wavs:
-        pytest.skip("No test audio in data/vtc_samples/short_fail/")
+        pytest.skip("No test audio in tests/fixtures/short_fail/")
 
     rows: list[dict] = []
 
@@ -179,7 +196,7 @@ def good_book_wavs() -> list[Path]:
     """Return sorted list of good_book WAV paths."""
     wavs = sorted(GOOD_BOOK.glob("*.wav"))
     if not wavs:
-        pytest.skip("No test audio in data/vtc_samples/good_book/")
+        pytest.skip("No test audio in tests/fixtures/good_book/")
     return wavs
 
 
@@ -188,5 +205,5 @@ def short_fail_wavs() -> list[Path]:
     """Return sorted list of short_fail WAV paths."""
     wavs = sorted(SHORT_FAIL.glob("*.wav"))
     if not wavs:
-        pytest.skip("No test audio in data/vtc_samples/short_fail/")
+        pytest.skip("No test audio in tests/fixtures/short_fail/")
     return wavs

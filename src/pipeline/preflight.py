@@ -8,8 +8,8 @@ Reports:
   - Estimated wall-clock time for the full pipeline
 
 Usage:
-    python scripts/preflight.py chunks30
-    python scripts/preflight.py chunks30 --sample 500
+    python -m src.pipeline.preflight chunks30
+    python -m src.pipeline.preflight chunks30 --sample 500
 """
 
 import argparse
@@ -17,7 +17,7 @@ import os
 import sys
 from pathlib import Path
 
-from scripts.utils import (
+from src.utils import (
     add_sample_argument,
     get_dataset_paths,
     load_benchmarks,
@@ -137,8 +137,8 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python scripts/preflight.py chunks30\n"
-            "  python scripts/preflight.py chunks30 --sample 500\n"
+            "  python -m src.pipeline.preflight chunks30\n"
+            "  python -m src.pipeline.preflight chunks30 --sample 500\n"
         ),
     )
     parser.add_argument(

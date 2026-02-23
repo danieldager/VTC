@@ -1,4 +1,4 @@
-"""Tests for scripts.core.parallel — parallel VAD driver."""
+"""Tests for src.core.parallel — parallel VAD driver."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import pytest
 
 from tests.conftest import requires_tenvad
 
-from scripts.core.parallel import run_vad_parallel
+from src.core.parallel import run_vad_parallel
 
 
 @requires_tenvad

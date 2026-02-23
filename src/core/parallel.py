@@ -9,8 +9,8 @@ import multiprocessing as mp
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-from scripts.core.checkpoint import save_checkpoint
-from scripts.core.vad_processing import process_file
+from src.core.checkpoint import save_checkpoint
+from src.core.vad_processing import process_vad_file
 
 
 def _log_bytes_progress(
@@ -37,11 +37,11 @@ def _log_bytes_progress(
     total_bytes = sum(file_sizes.values()) or 1
     all_done_bytes = done_bytes + inflight_bytes
 
+    gb = 1e9
     elapsed = time.time() - t0
     rate = all_done_bytes / elapsed if elapsed > 0 else 0
-    remaining = (total_bytes - all_done_bytes) / rate if rate > 0 else 0
-    eta = f"{remaining / 60:.0f}m" if remaining < 3600 else f"{remaining / 3600:.1f}h"
-    gb = 1e9
+    rem = (total_bytes - all_done_bytes) / rate if rate > 0 else 0
+    eta = f"{rem / 60:.0f}m" if rem < 3600 else f"{rem / 3600:.1f}h"
     pct = 100.0 * all_done_bytes / total_bytes
     print(
         f"  VAD  {completed:>4}/{total}"
@@ -58,11 +58,15 @@ def run_vad_parallel(
     workers: int,
     checkpoint_dir: Path | None = None,
     checkpoint_interval: int = 5000,
+    save_probs_dir: Path | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Run VAD on all files using a process pool.
 
     Uses ``mp.get_context("spawn")`` so that worker processes start
     fresh — no inherited ``torch`` pages from the parent.
+
+    If *save_probs_dir* is given, each worker saves a compressed
+    ``.npz`` file with the raw per-frame speech probabilities.
 
     Returns ``(metadata_rows, segment_rows)``.
     """
@@ -88,15 +92,17 @@ def run_vad_parallel(
     log_every = max(1, total // 20)
 
     ctx = mp.get_context("spawn")
-    progress_q: mp.Queue = ctx.Queue()  # workers → parent sample-count updates
-    tasks = [(w, hop_size, threshold, progress_q) for w in wavs]
+    manager = ctx.Manager()
+    progress_q = manager.Queue()  # workers → parent sample-count updates
+    probs_dir_str = str(save_probs_dir) if save_probs_dir else None
+    tasks = [(w, hop_size, threshold, progress_q, probs_dir_str) for w in wavs]
 
     print(
         f"Spawning {workers} workers for {total} files",
         flush=True,
     )
     with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool:
-        futures = {pool.submit(process_file, t): t[0] for t in tasks}
+        futures = {pool.submit(process_vad_file, t): t[0] for t in tasks}
         print(
             f"All {total} tasks submitted, waiting for results",
             flush=True,
@@ -104,9 +110,9 @@ def run_vad_parallel(
 
         completed = 0
         completed_ids: set[str] = set()
-        in_progress_samples: dict[str, int] = {}  # file_id → samples processed so far
+        in_progress_samples: dict[str, int] = {}
         last_heartbeat = time.time()
-        heartbeat_interval = 60  # seconds
+        heartbeat_interval = 300  # seconds
 
         for future in as_completed(futures):
             path = futures[future]
@@ -121,15 +127,16 @@ def run_vad_parallel(
                 else:
                     errors += 1
                     print(
-                        f"  WARN  {Path(path).stem}: "
-                        f"{meta['error']}",
-                        file=sys.stderr, flush=True,
+                        f"  WARN  {Path(path).stem}: " f"{meta['error']}",
+                        file=sys.stderr,
+                        flush=True,
                     )
             except Exception as e:
                 errors += 1
                 print(
                     f"  ERROR {Path(path).stem}: {e}",
-                    file=sys.stderr, flush=True,
+                    file=sys.stderr,
+                    flush=True,
                 )
 
             completed += 1
@@ -141,9 +148,13 @@ def run_vad_parallel(
             )
             if should_log:
                 _log_bytes_progress(
-                    progress_q, in_progress_samples,
-                    file_sizes, completed_ids,
-                    completed, total, t0,
+                    progress_q,  # type: ignore
+                    in_progress_samples,
+                    file_sizes,
+                    completed_ids,
+                    completed,
+                    total,
+                    t0,
                 )
                 last_heartbeat = now
 

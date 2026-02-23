@@ -1,4 +1,4 @@
-"""Tests for scripts.core.metadata — VTC metadata row builders."""
+"""Tests for src.core.metadata — VTC metadata row builders."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from scripts.core.metadata import (
+from src.core.metadata import (
     _EMPTY_VTC_META,
-    load_vad_reference,
+    load_vad_merged,
     vtc_error_row,
     vtc_meta_row,
 )
@@ -55,9 +55,9 @@ class TestVtcMetaRow:
         assert json.loads(row["vtc_label_counts"]) == {}
 
 
-class TestLoadVadReference:
+class TestLoadVadMerged:
     def test_empty_dir(self, tmp_path: Path):
-        result = load_vad_reference(tmp_path)
+        result = load_vad_merged(tmp_path)
         assert result == {}
 
     def test_loads_from_vad_merged(self, tmp_path: Path):
@@ -70,7 +70,7 @@ class TestLoadVadReference:
         })
         df.write_parquet(vad_dir / "segments.parquet")
 
-        result = load_vad_reference(tmp_path)
+        result = load_vad_merged(tmp_path)
         assert "a" in result
         assert "b" in result
         # "a" should have 2 pairs (possibly merged if close enough)

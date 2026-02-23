@@ -1,4 +1,4 @@
-"""Tests for scripts.core.checkpoint — checkpoint save / clear."""
+"""Tests for src.core.checkpoint — checkpoint save / clear."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from scripts.core.checkpoint import (
+from src.core.checkpoint import (
     CKPT_META,
     CKPT_SEGS,
     clear_checkpoint,

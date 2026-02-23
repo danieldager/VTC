@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=vad-ten
+#SBATCH --job-name=vad_ten
 #SBATCH --output=logs/vad/ten_%j.out
 #SBATCH --error=logs/vad/ten_%j.err
 #SBATCH --cpus-per-task=48
@@ -33,7 +33,7 @@ module load ffmpeg llvm
 export PYTHONPATH=$PYTHONPATH:$(pwd)
 
 PYTHONUNBUFFERED=1 \
-uv run scripts/vad.py "$DATASET" \
+uv run src/pipeline/vad.py "$DATASET" \
     --workers "$SLURM_CPUS_PER_TASK" \
     "$@"
 

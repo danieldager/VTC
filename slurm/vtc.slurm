@@ -37,7 +37,7 @@ module load git-lfs
 echo ""
 
 PYTHONUNBUFFERED=1 \
-uv run scripts/vtc.py "$DATASET" \
+uv run src/pipeline/vtc.py "$DATASET" \
     --array_id "$SLURM_ARRAY_TASK_ID" \
     --array_count "$SLURM_ARRAY_TASK_COUNT" \
     "$@"

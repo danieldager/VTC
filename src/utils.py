@@ -245,7 +245,9 @@ def shard_list(items: list, array_id: int, array_count: int) -> list:
         start = array_id * (base + 1)
         size = base + 1
     else:
-        start = remainder * (base + 1) + (array_id - remainder) * base
+        start = (
+            remainder * (base + 1) + (array_id - remainder) * base
+        )
         size = base
     return items[start : start + size]
 
@@ -283,89 +285,6 @@ def load_manifest(path: Path) -> pl.DataFrame:
         f"Unsupported manifest format '{suffix}'.  "
         f"Supported: {', '.join(SUPPORTED_MANIFEST_EXTENSIONS)}"
     )
-
-
-def get_task_shard(
-    manifest_path: str,
-    array_id: int,
-    array_count: int,
-    path_col: str = "path",
-    audio_root: str | None = None,
-) -> tuple[int, int, list[str]]:
-    """
-    Parses manifest (txt, csv, tsv, xlsx, parquet, json, jsonl) and returns
-    (total_files, chunk_size, file_paths) for the specific array task.
-
-    Args:
-        manifest_path: Path to the manifest file.
-        array_id:      SLURM array task ID (0-based).
-        array_count:   Total number of SLURM array tasks.
-        path_col:      Name of the column containing audio file paths.
-        audio_root:    Optional root directory to prepend to relative paths.
-    """
-    path = Path(manifest_path)
-    if not path.exists():
-        raise FileNotFoundError(f"{manifest_path} not found")
-
-    suffix = path.suffix.lower()
-
-    if suffix == ".txt":
-        # Read all lines
-        all_paths = sorted(
-            [l.strip() for l in path.read_text().splitlines() if l.strip()]
-        )
-        all_paths = resolve_audio_paths(all_paths, audio_root)
-
-        total_files = len(all_paths)
-        chunk_size = total_files // array_count
-        start_idx = array_id * chunk_size
-        if array_id == array_count - 1:
-            end_idx = total_files
-            chunk_size = end_idx - start_idx
-        else:
-            end_idx = start_idx + chunk_size
-
-        return total_files, chunk_size, all_paths[start_idx:end_idx]
-
-    elif suffix in SUPPORTED_MANIFEST_EXTENSIONS:
-        # Load via the unified reader
-        df = load_manifest(path)
-
-        # Identify path column
-        if path_col in df.columns:
-            col_name = path_col
-        elif path_col == "path" and "audio_filepath" in df.columns:
-            col_name = "audio_filepath"
-        else:
-            available = ", ".join(f"'{c}'" for c in df.columns)
-            raise ValueError(
-                f"Column '{path_col}' not found in manifest {manifest_path}.\n"
-                f"  Available columns: {available}\n"
-                f"  Use --path-col to specify the correct column name."
-            )
-
-        all_paths_series = df.sort(col_name).get_column(col_name).drop_nulls().to_list()
-        all_paths_list = resolve_audio_paths(all_paths_series, audio_root)
-
-        total_files = len(all_paths_list)
-        base_chunk_size = total_files // array_count
-        start_idx = array_id * base_chunk_size
-
-        length = base_chunk_size
-        if array_id == array_count - 1:
-            length = total_files - start_idx
-
-        return (
-            total_files,
-            length,
-            all_paths_list[start_idx : start_idx + length],
-        )
-
-    else:
-        raise ValueError(
-            f"Unsupported manifest extension: {suffix}.  "
-            f"Supported: {', '.join(SUPPORTED_MANIFEST_EXTENSIONS + ['.txt'])}"
-        )
 
 
 def merge_segments_df(
@@ -436,32 +355,6 @@ def merge_segments_df(
     if has_label:
         cols.append("label")
     return result.select(cols)
-
-
-# ---------------------------------------------------------------------------
-# Progress logging utilities
-# ---------------------------------------------------------------------------
-
-
-def log_progress(done: int, total: int, t0: float, label: str = "") -> None:
-    """Log processing progress with rate and ETA."""
-    elapsed = time.time() - t0
-    rate = done / elapsed if elapsed > 0 else 0
-    remaining = (total - done) / rate if rate > 0 else 0
-    eta = f"{remaining / 60:.0f}m" if remaining < 3600 else f"{remaining / 3600:.1f}h"
-    prefix = f"{label}: " if label else ""
-    print(f"  {prefix}[{done:>7}/{total}]  {rate:.1f} files/s  ETA {eta}")
-
-
-def get_log_interval(n: int) -> int:
-    """Get adaptive reporting interval based on progress."""
-    if n < 10_000:
-        return 1_000
-    if n < 50_000:
-        return 5_000
-    if n < 100_000:
-        return 10_000
-    return 20_000
 
 
 def atomic_write_parquet(
