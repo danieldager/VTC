@@ -26,7 +26,8 @@ def _log_bytes_progress(
     while True:
         try:
             file_id, samples = progress_q.get_nowait()
-            in_progress_samples[file_id] = samples
+            if file_id not in completed_ids:
+                in_progress_samples[file_id] = samples
         except _queue.Empty:
             break
 
@@ -35,7 +36,7 @@ def _log_bytes_progress(
     done_bytes = sum(file_sizes.get(fid, 0) for fid in completed_ids)
     inflight_bytes = sum(s * 2 for s in in_progress_samples.values())
     total_bytes = sum(file_sizes.values()) or 1
-    all_done_bytes = done_bytes + inflight_bytes
+    all_done_bytes = min(done_bytes + inflight_bytes, total_bytes)
 
     gb = 1e9
     elapsed = time.time() - t0

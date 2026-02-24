@@ -91,9 +91,9 @@ def _hhmmss(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-# ---------------------------------------------------------------------------
+# ------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------------
+# ------------------------------------------------------------------
 
 
 def main(
@@ -101,6 +101,7 @@ def main(
     config: str = "VTC-2.0/model/config.yml",
     checkpoint: str = "VTC-2.0/model/best.ckpt",
     target_iou: float = 0.9,
+    threshold: float | None = None,
     threshold_max: float = 0.5,
     threshold_min: float = 0.1,
     threshold_high: float = 0.9,
@@ -115,14 +116,19 @@ def main(
     array_count: int | None = None,
     sample: int | float | None = None,
 ):
+    # use fixed threshold, disable sweep & logits
+    fixed_threshold = threshold is not None
+    if fixed_threshold:
+        threshold_max = threshold
+        save_logits = False
     paths = get_dataset_paths(dataset)
     logger.info(f"Dataset: {dataset}")
     logger.info(f"  manifest  : {paths.manifest}")
     logger.info(f"  output    : {paths.output}")
 
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------
     # Load manifest and shard
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------
     manifest_df = load_manifest(paths.manifest)
     manifest_df = sample_manifest(manifest_df, sample)
     if sample is not None:
@@ -137,9 +143,9 @@ def main(
 
     shard_id = array_id if array_id is not None else 0
 
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------
     # Resume: skip files already processed by ANY shard
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------
     meta_dir = paths.output / "vtc_meta"
     meta_path = meta_dir / f"shard_{shard_id}.parquet"
     prev_meta_df: pl.DataFrame | None = None
@@ -164,9 +170,9 @@ def main(
         logger.info("No files to process.")
         return
 
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------
     # Load model
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------
     logger.info(f"Model: {Path(config).stem}")
     model_config: Config = load_config(config)
     l_encoder = MultiLabelEncoder(labels=model_config.data.classes)
@@ -182,9 +188,9 @@ def main(
     conv_settings = model.conv_settings
     chunk_duration_s = model_config.audio.chunk_duration_s
 
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------
     # Load VAD reference for adaptive thresholding
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------
     vad_by_uid = load_vad_merged(paths.output)
     adaptive = bool(vad_by_uid)
     if adaptive:
@@ -196,28 +202,32 @@ def main(
 
     # Threshold sweep list (bidirectional from threshold_max)
     # Upward first (reduces over-detection), then downward.
-    thresholds: list[float] = []
-    t = threshold_max
-    while t <= threshold_high + 1e-9:
-        thresholds.append(round(t, 4))
-        t += threshold_step
-    t = threshold_max - threshold_step
-    while t >= threshold_min - 1e-9:
-        thresholds.append(round(t, 4))
-        t -= threshold_step
-    th_str = ", ".join(f"{t:.2f}" for t in thresholds)
-    logger.info(f"Thresholds: [{th_str}]")
+    if fixed_threshold:
+        thresholds = [threshold_max]
+        logger.info(f"Fixed threshold: {threshold_max} (no sweep)")
+    else:
+        thresholds = []
+        t = threshold_max
+        while t <= threshold_high + 1e-9:
+            thresholds.append(round(t, 4))
+            t += threshold_step
+        t = threshold_max - threshold_step
+        while t >= threshold_min - 1e-9:
+            thresholds.append(round(t, 4))
+            t -= threshold_step
+        th_str = ", ".join(f"{t:.2f}" for t in thresholds)
+        logger.info(f"Thresholds: [{th_str}]")
 
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------
     # Logit saving (optional)
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------
     logits_dir = paths.output / "logits"
     if save_logits:
         logits_dir.mkdir(parents=True, exist_ok=True)
 
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------
     # Process files
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------
     meta_rows: list[dict] = []
     seg_rows: list[dict] = []
     n_met_target = 0
@@ -454,9 +464,9 @@ def main(
                 f"segment rows (shard {shard_id})"
             )
 
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------
     # Save outputs
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------
     meta_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_parquet(meta_df, meta_path)
 
@@ -471,9 +481,9 @@ def main(
     merged_path = vtc_merged_dir / f"shard_{shard_id}.parquet"
     atomic_write_parquet(merged_df, merged_path)
 
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------
     # Summary
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------
     processed = total - n_errors
     wall = time.time() - t0
     print(flush=True)
@@ -549,6 +559,12 @@ if __name__ == "__main__":
         type=float,
         default=0.9,
         help="Per-file VTC–VAD IoU target for adaptive thresholding (default: 0.9)",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="Fixed threshold — skip sweep, no logits. Overrides sweep params.",
     )
     parser.add_argument(
         "--threshold_max",

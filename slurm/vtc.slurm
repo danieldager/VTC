@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=vtc_infer
-#SBATCH --output=logs/vtc/infer_%A_%a.out
-#SBATCH --error=logs/vtc/infer_%A_%a.err
+#SBATCH --output=logs/vtc/vtc_%A_%a.out
+#SBATCH --error=logs/vtc/vtc_%A_%a.err
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=24:00:00

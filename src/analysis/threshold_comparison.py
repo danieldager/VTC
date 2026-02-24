@@ -34,12 +34,14 @@ if TYPE_CHECKING:
 
 # ---------------------------------------------------------------------------
 # Lazy torch / segma imports — only needed for VTC re-thresholding
+# NOTE: We do NOT import ``segma.inference`` because it transitively
+# pulls in ``torchcodec`` which needs FFmpeg shared libs at import time.
+# The two tiny functions we need (apply_thresholds, create_intervals) are
+# inlined below to avoid that dependency chain.
 # ---------------------------------------------------------------------------
 _torch: ModuleType | None = None
-_segma_apply: Any = None
-_segma_create: Any = None
-_segma_conv: Any = None
-_segma_encoder: Any = None
+_conv_settings_cls: Any = None
+_label_encoder_cls: Any = None
 
 
 def _ensure_torch() -> ModuleType:
@@ -51,18 +53,48 @@ def _ensure_torch() -> ModuleType:
     return _torch  # type: ignore[return-value]
 
 
-def _ensure_segma() -> tuple[Any, Any, Any, Any]:
-    global _segma_apply, _segma_create, _segma_conv, _segma_encoder
-    if _segma_apply is None:
-        from segma.inference import apply_thresholds, create_intervals
+def _ensure_segma_types() -> tuple[Any, Any]:
+    """Import ConvolutionSettings and MultiLabelEncoder (no torchcodec needed)."""
+    global _conv_settings_cls, _label_encoder_cls
+    if _conv_settings_cls is None:
         from segma.models.base import ConvolutionSettings
         from segma.utils.encoders import MultiLabelEncoder
 
-        _segma_apply = apply_thresholds
-        _segma_create = create_intervals
-        _segma_conv = ConvolutionSettings
-        _segma_encoder = MultiLabelEncoder
-    return _segma_apply, _segma_create, _segma_conv, _segma_encoder
+        _conv_settings_cls = ConvolutionSettings
+        _label_encoder_cls = MultiLabelEncoder
+    return _conv_settings_cls, _label_encoder_cls
+
+
+def _apply_thresholds(
+    feature_tensor: Any,
+    thresholds: dict[str, dict[str, float]],
+    device: str,
+) -> Any:
+    """Apply sigmoid + threshold to raw logits (inlined from segma.inference)."""
+    torch = _ensure_torch()
+    feature_tensor = feature_tensor.sigmoid()
+    threshold_tensor = torch.tensor(
+        [label["lower_bound"] for label in thresholds.values()]
+    ).to(torch.device(device))
+    return feature_tensor > threshold_tensor
+
+
+def _create_intervals(
+    thresholded_features: Any,
+    conv_settings: Any,
+    label_encoder: Any,
+) -> list[tuple[int, int, str]]:
+    """Build detection intervals from thresholded logits (inlined from segma.inference)."""
+    intervals: list[tuple[int, int, str]] = []
+    slices = np.ma.notmasked_contiguous(
+        np.ma.masked_values(thresholded_features, value=0), axis=0
+    )
+    for label_i, label in enumerate(label_encoder.base_labels):
+        for sl in slices[label_i]:
+            interval_start = max(0, conv_settings.rf_start_i(sl.start))
+            interval_end = conv_settings.rf_end_i(sl.stop - 1) + 1
+            intervals.append((interval_start, interval_end, label))
+    return intervals
 
 
 # ---------------------------------------------------------------------------
@@ -95,8 +127,7 @@ def vad_probs_to_pairs(
 
     factor = hop_size / sr
     return [
-        (round(float(s * factor), 3), round(float(e * factor), 3))
-        for s, e in speech
+        (round(float(s * factor), 3), round(float(e * factor), 3)) for s, e in speech
     ]
 
 
@@ -113,7 +144,6 @@ def vtc_logits_to_pairs(
 ) -> list[tuple[float, float]]:
     """Apply *threshold* to saved VTC logits and return merged label-agnostic pairs."""
     torch = _ensure_torch()
-    apply_thresholds, create_intervals, _, _ = _ensure_segma()
     from src.core.intervals import intervals_to_pairs
 
     labels = l_encoder._labels
@@ -129,8 +159,8 @@ def vtc_logits_to_pairs(
         label: {"lower_bound": threshold, "upper_bound": 1.0} for label in labels
     }
 
-    thresholded = apply_thresholds(logit_tensor, thresh_dict, "cpu").detach()
-    intervals = create_intervals(thresholded, conv_settings, l_encoder)
+    thresholded = _apply_thresholds(logit_tensor, thresh_dict, "cpu").detach()
+    intervals = _create_intervals(thresholded, conv_settings, l_encoder)
     return intervals_to_pairs(intervals)
 
 
@@ -148,11 +178,23 @@ def compute_metrics(
     vad_dur = sum(b - a for a, b in vad_pairs)
 
     if not vtc_pairs and not vad_pairs:
-        return {"iou": 1.0, "precision": 1.0, "recall": 1.0,
-                "vtc_dur": 0.0, "vad_dur": 0.0, "tp": 0.0}
+        return {
+            "iou": 1.0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "vtc_dur": 0.0,
+            "vad_dur": 0.0,
+            "tp": 0.0,
+        }
     if not vtc_pairs or not vad_pairs:
-        return {"iou": 0.0, "precision": 0.0, "recall": 0.0,
-                "vtc_dur": vtc_dur, "vad_dur": vad_dur, "tp": 0.0}
+        return {
+            "iou": 0.0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "vtc_dur": vtc_dur,
+            "vad_dur": vad_dur,
+            "tp": 0.0,
+        }
 
     # Two-pointer intersection
     tp = 0.0
@@ -195,10 +237,16 @@ def discover_files(
     vtc_dir = output_dir / "logits"
 
     if not vad_dir.exists():
-        print(f"ERROR: {vad_dir} does not exist. Run VAD with --save_logits.", file=sys.stderr)
+        print(
+            f"ERROR: {vad_dir} does not exist. Run VAD with --save_logits.",
+            file=sys.stderr,
+        )
         sys.exit(1)
     if not vtc_dir.exists():
-        print(f"ERROR: {vtc_dir} does not exist. Run VTC with --save_logits.", file=sys.stderr)
+        print(
+            f"ERROR: {vtc_dir} does not exist. Run VTC with --save_logits.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     vad_files = {p.stem.removesuffix("-probs"): p for p in vad_dir.glob("*.npz")}
@@ -206,7 +254,10 @@ def discover_files(
 
     common = sorted(set(vad_files) & set(vtc_files))
     if not common:
-        print("ERROR: No matching files found between vad_probs/ and logits/.", file=sys.stderr)
+        print(
+            "ERROR: No matching files found between vad_probs/ and logits/.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     vad_only = set(vad_files) - set(vtc_files)
@@ -252,18 +303,17 @@ def run_analysis(
 
     # --- Load VTC model config for re-thresholding ---
     torch = _ensure_torch()
-    _ensure_segma()
+    ConvolutionSettings, MultiLabelEncoder = _ensure_segma_types()
     from segma.config import load_config, Config
-    from segma.models.base import ConvolutionSettings
-    from segma.utils.encoders import MultiLabelEncoder
+
+    # NOTE: segma.models triggers torchcodec, but only at model.load — we
+    # need it here once to extract conv_settings from the checkpoint.
+    from segma.models import Models
 
     config_path = "VTC-2.0/model/config.yml"
     ckpt_path = "VTC-2.0/model/best.ckpt"
     model_config: Config = load_config(config_path)
     l_encoder = MultiLabelEncoder(labels=model_config.data.classes)
-
-    # We need ConvolutionSettings — load from checkpoint metadata
-    from segma.models import Models
 
     model = Models[model_config.model.name].load_from_checkpoint(
         checkpoint_path=ckpt_path,
@@ -280,7 +330,7 @@ def run_analysis(
     t0 = time.time()
 
     vad_data: list[tuple[str, np.ndarray, int]] = []  # (uid, probs, hop_size)
-    vtc_data: list[tuple[str, dict]] = []             # (uid, logits_dict)
+    vtc_data: list[tuple[str, dict]] = []  # (uid, logits_dict)
 
     for uid, vad_path, vtc_path in files:
         # VAD
@@ -310,11 +360,13 @@ def run_analysis(
         for uid, logits_dict in vtc_data:
             pairs = vtc_logits_to_pairs(logits_dict, thresh, conv_settings, l_encoder)
             vtc_hours += sum(b - a for a, b in pairs) / 3600
-        vol_rows.append({
-            "threshold": thresh,
-            "vad_hours": round(vad_hours, 2),
-            "vtc_hours": round(vtc_hours, 2),
-        })
+        vol_rows.append(
+            {
+                "threshold": thresh,
+                "vad_hours": round(vad_hours, 2),
+                "vtc_hours": round(vtc_hours, 2),
+            }
+        )
         print(
             f"  t={thresh:.2f}  VAD={vad_hours:.1f}h  VTC={vtc_hours:.1f}h",
             flush=True,
@@ -368,26 +420,34 @@ def run_analysis(
                 total_tp += m["tp"]
 
                 if save_per_file:
-                    per_file_rows.append({
-                        "uid": uid,
-                        "vad_threshold": vad_t,
-                        "vtc_threshold": vtc_t,
-                        **m,
-                    })
+                    per_file_rows.append(
+                        {
+                            "uid": uid,
+                            "vad_threshold": vad_t,
+                            "vtc_threshold": vtc_t,
+                            **m,
+                        }
+                    )
 
             mean_iou = np.mean(ious)
-            grid_rows.append({
-                "vad_threshold": vad_t,
-                "vtc_threshold": vtc_t,
-                "mean_iou": round(float(mean_iou), 4),
-                "median_iou": round(float(np.median(ious)), 4),
-                "mean_precision": round(float(np.mean(precs)), 4),
-                "mean_recall": round(float(np.mean(recs)), 4),
-                "total_vtc_hours": round(total_vtc_dur / 3600, 2),
-                "total_vad_hours": round(total_vad_dur / 3600, 2),
-                "total_tp_hours": round(total_tp / 3600, 2),
-                "vtc_vad_ratio": round(total_vtc_dur / total_vad_dur, 3) if total_vad_dur > 0 else float("nan"),
-            })
+            grid_rows.append(
+                {
+                    "vad_threshold": vad_t,
+                    "vtc_threshold": vtc_t,
+                    "mean_iou": round(float(mean_iou), 4),
+                    "median_iou": round(float(np.median(ious)), 4),
+                    "mean_precision": round(float(np.mean(precs)), 4),
+                    "mean_recall": round(float(np.mean(recs)), 4),
+                    "total_vtc_hours": round(total_vtc_dur / 3600, 2),
+                    "total_vad_hours": round(total_vad_dur / 3600, 2),
+                    "total_tp_hours": round(total_tp / 3600, 2),
+                    "vtc_vad_ratio": (
+                        round(total_vtc_dur / total_vad_dur, 3)
+                        if total_vad_dur > 0
+                        else float("nan")
+                    ),
+                }
+            )
 
             if combo_i % 10 == 0 or combo_i == n_combos:
                 elapsed = time.time() - t0
@@ -429,9 +489,11 @@ def run_analysis(
 # Plotting
 # ---------------------------------------------------------------------------
 
+
 def _plot_heatmap(grid_df: pl.DataFrame, fig_dir: Path) -> None:
     """Generate IoU + Precision + Recall heatmaps."""
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
@@ -472,8 +534,15 @@ def _plot_heatmap(grid_df: pl.DataFrame, fig_dir: Path) -> None:
             for j in range(len(vtc_vals)):
                 val = matrix[i, j]
                 color = "white" if val < 0.4 or val > 0.85 else "black"
-                ax.text(j, i, f"{val:.2f}", ha="center", va="center",
-                        fontsize=7, color=color)
+                ax.text(
+                    j,
+                    i,
+                    f"{val:.2f}",
+                    ha="center",
+                    va="center",
+                    fontsize=7,
+                    color=color,
+                )
 
         plt.colorbar(im, ax=ax, shrink=0.8)
 
@@ -488,6 +557,7 @@ def _plot_heatmap(grid_df: pl.DataFrame, fig_dir: Path) -> None:
 def _plot_volume_sensitivity(vol_df: pl.DataFrame, fig_dir: Path) -> None:
     """Bar chart showing total speech hours vs threshold for each system."""
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
@@ -499,7 +569,14 @@ def _plot_volume_sensitivity(vol_df: pl.DataFrame, fig_dir: Path) -> None:
     x = np.arange(len(thresholds))
     width = 0.35
 
-    ax.bar(x - width / 2, vad_hours, width, label="VAD (TenVAD)", color="#2196F3", alpha=0.8)
+    ax.bar(
+        x - width / 2,
+        vad_hours,
+        width,
+        label="VAD (TenVAD)",
+        color="#2196F3",
+        alpha=0.8,
+    )
     ax.bar(x + width / 2, vtc_hours, width, label="VTC", color="#FF5722", alpha=0.8)
 
     ax.set_xlabel("Threshold")
@@ -537,27 +614,39 @@ def main() -> None:
         help="Dataset name (must have vad_probs/ and logits/ in its output dir).",
     )
     parser.add_argument(
-        "--vad_min", type=float, default=0.1,
+        "--vad_min",
+        type=float,
+        default=0.1,
         help="Minimum VAD threshold (default: 0.1)",
     )
     parser.add_argument(
-        "--vad_max", type=float, default=0.9,
+        "--vad_max",
+        type=float,
+        default=0.9,
         help="Maximum VAD threshold (default: 0.9)",
     )
     parser.add_argument(
-        "--vad_step", type=float, default=0.1,
+        "--vad_step",
+        type=float,
+        default=0.1,
         help="VAD threshold step (default: 0.1)",
     )
     parser.add_argument(
-        "--vtc_min", type=float, default=0.1,
+        "--vtc_min",
+        type=float,
+        default=0.1,
         help="Minimum VTC threshold (default: 0.1)",
     )
     parser.add_argument(
-        "--vtc_max", type=float, default=0.9,
+        "--vtc_max",
+        type=float,
+        default=0.9,
         help="Maximum VTC threshold (default: 0.9)",
     )
     parser.add_argument(
-        "--vtc_step", type=float, default=0.1,
+        "--vtc_step",
+        type=float,
+        default=0.1,
         help="VTC threshold step (default: 0.1)",
     )
     parser.add_argument(

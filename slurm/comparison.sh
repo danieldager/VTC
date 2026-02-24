@@ -106,27 +106,27 @@ echo ""
 VAD_JOB=$(sbatch --parsable \
     slurm/vad.slurm "$DATASET" --save_logits --sample "$SAMPLE")
 
-echo "  1. VAD (save probs) : $VAD_JOB"
+echo "  1a. VAD (save probs) : $VAD_JOB"
 
 # ---------- Step 2: VTC with --save_logits --no_regions -------------------
 
 VTC_JOB=$(sbatch --parsable \
-    --dependency=afterok:${VAD_JOB} \
     --array=0 \
     slurm/vtc.slurm "$DATASET" \
         --save_logits \
         --no_regions \
         --sample "$SAMPLE")
 
-echo "  2. VTC (full-file)  : $VTC_JOB"
+echo "  1b. VTC (full-file)  : $VTC_JOB"
 
-# ---------- Step 3: Threshold comparison analysis -------------------------
+# ---------- Step 2: Threshold comparison analysis -------------------------
+#   Depends on BOTH VAD and VTC finishing successfully.
 
 CMP_JOB=$(sbatch --parsable \
-    --dependency=afterok:${VTC_JOB} \
+    --dependency=afterok:${VAD_JOB}:${VTC_JOB} \
     slurm/threshold_comparison.slurm "$DATASET")
 
-echo "  3. Analysis         : $CMP_JOB"
+echo "  2.  Analysis         : $CMP_JOB"
 
 echo ""
 echo "Monitor: squeue -u \$USER"
