@@ -49,14 +49,26 @@ pip install -r requirements.txt
 
 ## 2. Quick Start
 
+### Generate a manifest from a directory
+
+If your audio files live in a directory (no pre-existing metadata file), generate
+a ready-to-use manifest with:
+
+```bash
+python scripts/make_manifest.py /path/to/audio/ -name my_dataset
+```
+
+This recursively scans for all common audio formats (`wav`, `flac`, `mp3`, `ogg`,
+`opus`, `m4a`, `aac`, `aiff`, `wma`) and writes `manifests/my_dataset.csv` with
+columns `path` (absolute), `uid` (filename stem), and `ext` (format).
+
 ### Single-folder inference
 
-Run the model on a folder of WAV files (16 kHz, mono):
+Run the VTC model on a folder of audio files:
 
 ```bash
 uv run python -m src.pipeline.vtc my_data \
-    --manifest my_audios/ \
-    --device cuda
+    --manifest manifests/my_dataset.csv \
 ```
 
 ### Full pipeline on a SLURM cluster
@@ -66,7 +78,7 @@ Process an entire dataset end-to-end (VAD → VTC → comparison metrics):
 ```bash
 # First run with a custom manifest:
 bash slurm/pipeline.sh my_data \
-    --manifest /data/recordings.xlsx \
+    --manifest /data/recordings.parquet \
     --path-col audio_path \
     --audio-root /store/audio/
 
@@ -84,15 +96,15 @@ The pipeline runs four steps, each as a SLURM job:
 
 | Step | Module | Resource | Description |
 |------|--------|----------|-------------|
-| **1. VAD** | `src.pipeline.vad` | 48 CPUs | TenVAD speech detection (multiprocessed, ~31 MB/worker) |
-| **2. VTC** | `src.pipeline.vtc` | 4× GPU | VTC-2.0 inference with fixed sigmoid threshold (default 0.5) |
-| **3. SNR** | `src.pipeline.snr` | 4× GPU | Brouhaha SNR/C50 extraction per audio file |
-| **4. Noise** | `src.pipeline.noise` | 4× GPU | PANNs CNN14 noise classification per audio file |
-| **5. Package** | `src.pipeline.package` | 4 CPUs | Tile audio into ≤10-min clips → WebDataset shards + dashboard |
+| **1. VAD** | `src.pipeline.vad` | CPU | TenVAD speech detection (multiprocessed, ~31 MB/worker) |
+| **2. VTC** | `src.pipeline.vtc` | GPU | VTC-2.0 inference with default threshold (0.5) |
+| **3. SNR** | `src.pipeline.snr` | GPU | Brouhaha SNR/C50 extraction per audio file |
+| **4. Noise** | `src.pipeline.noise` | GPU | PANNs CNN14 noise classification per audio file |
+| **5. Package** | `src.pipeline.package` | CPU | ≤10-min clipping → WebDataset shards + plots |
 
 **Resume support:** Both VAD and VTC save checkpoints. Interrupted jobs can be resubmitted and will skip already-completed files.
 
-### Packaging (Step 4)
+### Packaging (Step 5)
 
 The packaging step tiles full audio files into clips of roughly equal length, cutting only at silence gaps (never mid-speech). Cut-point selection uses a **6-tier fallback chain**:
 
@@ -105,12 +117,43 @@ The packaging step tiles full audio files into clips of roughly equal length, cu
 | 5 | VTC speaker-change boundary (inside active audio) | Warning |
 | 6 | Hard cut — no gaps or boundaries | Warning |
 
-Within each tier, the midpoint closest to the ideal evenly-distributed position is chosen. The pipeline output includes a **tier breakdown** showing how many cuts used each strategy, so you can assess cut quality at a glance.
+Within each tier, the midpoint closest to the ideal evenly-distributed position is chosen. The pipeline output includes a **tier breakdown** showing how many cuts used each strategy.
 
 Output:
-- `output/{dataset}/shards/` — WebDataset `.tar` shards (FLAC audio + JSON metadata)
+- `output/{dataset}/shards/` — WebDataset `.tar` shards (WAV/FLAC + JSON metadata)
 - `output/{dataset}/shards/manifest.csv` — per-clip metadata
 - `output/{dataset}/shards/samples/` — random sample clips for manual validation
+
+### Clip metadata
+
+Each clip in a shard is stored as up to four files sharing the key `{uid}_{clip_idx:04d}`:
+
+| File | Format | Contents |
+|------|--------|----------|
+| `{clip_id}.flac` / `.wav` | FLAC / WAV | Mono audio, 16 kHz |
+| `{clip_id}.json` | JSON (UTF-8) | All scalar + structured metadata (see below) |
+| `{clip_id}.snr.npy` | NumPy float16 | Time-series SNR values per `snr_step_s` window *(optional)* |
+| `{clip_id}.c50.npy` | NumPy float16 | Time-series C50 values per `snr_step_s` window *(optional)* |
+
+The `.json` sidecar contains:
+
+**Provenance** — `uid`, `clip_idx`, `clip_id`, `abs_onset`, `abs_offset`, `duration` (seconds within the source file), `source_path`, `audio_fmt`, `sample_rate`.
+
+**VTC speech** — `vtc_speech_duration`, `vtc_speech_density`, `n_vtc_segments`, `mean_vtc_seg_duration`, `mean_vtc_gap`, `n_turns`, `n_labels`, `labels_present` (list of speaker types), `has_adult`, `dominant_label`, `label_durations` (seconds per type), `vad_coverage_by_label` (fraction of each VTC label also covered by VAD).
+
+**Demographics** — `child_speech_duration`, `adult_speech_duration`, `child_fraction` (share of VTC speech that is child).
+
+**VAD speech** — `vad_speech_duration`, `vad_speech_density`, `n_vad_segments`.
+
+**VAD–VTC agreement** — `vad_vtc_iou`: frame-level Intersection over Union between the two systems' masks.
+
+**SNR** *(Brouhaha; null if not run)* — `snr_mean`, `snr_std`, `snr_min`, `snr_max` (dB); `snr_step_s` (window size); `snr` (full time-series list, also stored as `.snr.npy`).
+
+**C50 clarity** *(Brouhaha; null if not run)* — `c50_mean`, `c50_std`, `c50_min`, `c50_max` (dB); `c50` (full time-series, also stored as `.c50.npy`). Higher C50 = less reverberation.
+
+**Noise environment** *(PANNs; null if not run)* — `dominant_noise` (category name), `noise_profile` (dict of mean probability per category).
+
+**Segment detail** — `vad_segments` and `vtc_segments`: lists of `{onset, offset, duration}` objects with timestamps relative to the clip start. `vtc_segments` additionally carry a `label` field (FEM / MAL / KCHI / OCH).
 
 ---
 
@@ -123,10 +166,10 @@ VTC/
 │   ├── compat.py            # Compatibility shims (torchaudio patches)
 │   ├── pipeline/            # CLI entry points (one per pipeline step)
 │   │   ├── vad.py           #   Step 1: Voice activity detection
-│   │   ├── vtc.py           #   Step 2: VTC inference
+│   │   ├── vtc.py           #   Step 2: VTC inference (diarization)
 │   │   ├── snr.py           #   Step 3: Brouhaha SNR/C50 extraction
 │   │   ├── noise.py         #   Step 4: PANNs CNN14 noise classification
-│   │   ├── package.py       #   Step 5: Audio tiling + WebDataset shards
+│   │   ├── package.py       #   Step 5: Audio clipping + WebDataset shards
 │   │   ├── compare.py       #   VAD vs VTC comparison helpers
 │   │   ├── normalize.py     #   Manifest normalization
 │   │   └── preflight.py     #   Pre-pipeline dataset scan
@@ -170,7 +213,8 @@ VTC/
 │   ├── test_reproducibility.py
 │   └── test_stitched_audio.py
 ├── scripts/
-│   └── download_brouhaha.py # Auto-download Brouhaha checkpoint
+│   ├── download_brouhaha.py # Auto-download Brouhaha checkpoint
+│   └── make_manifest.py     # Generate manifest from audio directory
 ├── models/                  # Brouhaha checkpoint (gitignored, auto-downloaded)
 │   └── best/checkpoints/
 │       └── best.ckpt        #   ~47 MB, from ylacombe/brouhaha-best
@@ -180,7 +224,6 @@ VTC/
 │       └── config.yml       #   segma training config
 ├── manifests/               # Dataset manifests (one CSV per dataset)
 ├── output/                  # Pipeline outputs (per-dataset subdirs)
-├── metadata/                # Per-file statistics (per-dataset subdirs)
 ├── figures/                 # Diagnostic plots (per-dataset subdirs)
 ├── logs/                    # SLURM logs + benchmark records
 ├── pyproject.toml           # Python project config (uv / pip)
@@ -193,9 +236,8 @@ VTC/
 All paths are derived from the dataset name:
 
 ```
-manifests/{dataset}.csv  →  output/{dataset}/   (segments, metrics, figures)
-                         →  metadata/{dataset}/  (per-file statistics)
-                         →  figures/{dataset}/   (diagnostic plots)
+manifests/{dataset}.csv  →  output/{dataset}/   (metadata, segments, metrics)
+                         →  figures/{dataset}/  (plots)
 ```
 
 ### Running tests

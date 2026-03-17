@@ -254,9 +254,7 @@ def shard_list(items: list, array_id: int, array_count: int) -> list:
         start = array_id * (base + 1)
         size = base + 1
     else:
-        start = (
-            remainder * (base + 1) + (array_id - remainder) * base
-        )
+        start = remainder * (base + 1) + (array_id - remainder) * base
         size = base
     return items[start : start + size]
 
@@ -388,6 +386,7 @@ def _get_gpu_name() -> str:
     """Best-effort GPU name (empty string if unavailable)."""
     try:
         import torch
+
         if torch.cuda.is_available():
             return torch.cuda.get_device_name(0)
     except Exception:
@@ -431,7 +430,11 @@ def log_benchmark(
         "total_audio_seconds": round(total_audio_seconds, 2),
         "total_bytes": total_bytes,
         "files_per_second": round(n_files / wall_seconds, 2) if wall_seconds > 0 else 0,
-        "bytes_per_second": round(total_bytes / wall_seconds, 2) if wall_seconds > 0 and total_bytes > 0 else 0,
+        "bytes_per_second": (
+            round(total_bytes / wall_seconds, 2)
+            if wall_seconds > 0 and total_bytes > 0
+            else 0
+        ),
         "hardware": _hardware_info(n_workers),
     }
     if extra:
