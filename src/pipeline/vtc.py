@@ -107,7 +107,7 @@ def main(
     threshold: float = 0.5,
     min_duration_on_s: float = 0.1,
     min_duration_off_s: float = 0.3,
-    batch_size: int = 128,
+    batch_size: int = 0,
     save_logits: bool = False,
     device: Literal["cuda", "cpu", "mps"] = "cuda",
     array_id: int | None = None,
@@ -116,11 +116,23 @@ def main(
 ):
     set_seeds(42)
 
+    # Auto-detect batch size from GPU VRAM when batch_size <= 0
+    if batch_size <= 0:
+        from src.pipeline.resources import query_local_gpu, recommend_vtc_batch_size
+        local_gpu = query_local_gpu()
+        if local_gpu is not None:
+            batch_size = recommend_vtc_batch_size(local_gpu.vram_gb)
+            logger.info(f"Auto batch_size={batch_size} for {local_gpu.name} ({local_gpu.vram_gb} GB)")
+        else:
+            batch_size = 128
+            logger.info(f"No GPU detected — using default batch_size={batch_size}")
+
     paths = get_dataset_paths(dataset)
     logger.info(f"Dataset: {dataset}")
     logger.info(f"  manifest  : {paths.manifest}")
     logger.info(f"  output    : {paths.output}")
     logger.info(f"  threshold : {threshold}")
+    logger.info(f"  batch_size: {batch_size}")
 
     # --------------------------------------------------------------
     # Load manifest and shard
@@ -454,8 +466,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=128,
-        help="Batch size for model forward pass (default: 128)",
+        default=0,
+        help=(
+            "Batch size for model forward pass. "
+            "0 = auto-detect from GPU VRAM (default: 0)."
+        ),
     )
     parser.add_argument(
         "--save_logits",

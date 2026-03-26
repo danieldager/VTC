@@ -44,14 +44,30 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
+# Segma chunk grid geometry (HuBERT surgical_hydra)
+# 199 windows × 320-sample stride = 63,680 samples at 16 kHz = 3.98 s
+_SR: int = 16_000
+CHUNK_STEP_F: int = 63_680  # samples
+CHUNK_STEP_S: float = CHUNK_STEP_F / _SR  # 3.98 s
+
+
+def snap_to_grid(t: float, file_duration: float) -> float:
+    """Round *t* to the nearest multiple of ``CHUNK_STEP_S``.
+
+    The result is clamped to ``[0, file_duration]``.
+    """
+    snapped = round(t / CHUNK_STEP_S) * CHUNK_STEP_S
+    return max(0.0, min(snapped, file_duration))
+
+
 # Tier labels for cut-point statistics (order = priority)
 CUT_TIERS: tuple[str, ...] = (
-    "long_union_gap",     # 1. Long silence gap (≥ min_gap_s) in VAD∪VTC union
-    "short_union_gap",    # 2. Any silence gap in VAD∪VTC union
-    "vad_only_gap",       # 3. Gap in VAD-only mask (VTC still active)
-    "vtc_only_gap",       # 4. Gap in VTC-only mask (VAD still active)
-    "speaker_boundary",   # 5. VTC speaker-change boundary (inside active audio)
-    "hard_cut",           # 6. No gaps or boundaries — forced cut
+    "long_union_gap",  # 1. Long silence gap (≥ min_gap_s) in VAD∪VTC union
+    "short_union_gap",  # 2. Any silence gap in VAD∪VTC union
+    "vad_only_gap",  # 3. Gap in VAD-only mask (VTC still active)
+    "vtc_only_gap",  # 4. Gap in VTC-only mask (VAD still active)
+    "speaker_boundary",  # 5. VTC speaker-change boundary (inside active audio)
+    "hard_cut",  # 6. No gaps or boundaries — forced cut
     "degenerate_window",  # 0. Degenerate search window — forced cut
 )
 
@@ -74,8 +90,9 @@ class Segment:
         return self.offset - self.onset
 
 
-def _compute_iou(segs_a: list[Segment], segs_b: list[Segment],
-                 clip_onset: float, clip_offset: float) -> float:
+def _compute_iou(
+    segs_a: list[Segment], segs_b: list[Segment], clip_onset: float, clip_offset: float
+) -> float:
     """Compute frame-level IoU between two segment lists within a clip.
 
     Uses 0.1 s resolution for efficiency.
@@ -116,11 +133,6 @@ class Clip:
     # Segments (absolute coords — will be made relative at export)
     vad_segments: list[Segment] = field(default_factory=list)
     vtc_segments: list[Segment] = field(default_factory=list)
-    # SNR (set after clip building, from file-level pooled Brouhaha SNR)
-    snr_array: np.ndarray | None = field(default=None, repr=False)
-    snr_step_s: float = 1.0
-    # C50 clarity (set after clip building, from file-level pooled Brouhaha C50)
-    c50_array: np.ndarray | None = field(default=None, repr=False)
     # Noise classification (set after clip building, from PANNs pipeline)
     noise_array: np.ndarray | None = field(default=None, repr=False)  # (n_bins, n_cats)
     noise_categories: list[str] = field(default_factory=list)  # category names
@@ -178,16 +190,20 @@ class Clip:
     def vad_vtc_iou(self) -> float:
         """Frame-level IoU between VAD and VTC segments within this clip."""
         return _compute_iou(
-            self.vad_segments, self.vtc_segments,
-            self.abs_onset, self.abs_offset,
+            self.vad_segments,
+            self.vtc_segments,
+            self.abs_onset,
+            self.abs_offset,
         )
 
     def _vtc_gaps(self) -> list[float]:
         """Gaps between consecutive VTC segments (seconds)."""
         segs = sorted(self.vtc_segments, key=lambda s: s.onset)
-        return [segs[i].onset - segs[i - 1].offset
-                for i in range(1, len(segs))
-                if segs[i].onset > segs[i - 1].offset]
+        return [
+            segs[i].onset - segs[i - 1].offset
+            for i in range(1, len(segs))
+            if segs[i].onset > segs[i - 1].offset
+        ]
 
     @property
     def mean_vtc_gap(self) -> float:
@@ -199,64 +215,6 @@ class Clip:
         if not self.vtc_segments:
             return 0.0
         return sum(s.duration for s in self.vtc_segments) / len(self.vtc_segments)
-
-    # --- SNR properties ---
-
-    @property
-    def snr_mean(self) -> float | None:
-        """Mean SNR across the clip (dB), or None if SNR not available."""
-        if self.snr_array is None or len(self.snr_array) == 0:
-            return None
-        return float(np.mean(self.snr_array, dtype=np.float32))
-
-    @property
-    def snr_std(self) -> float | None:
-        """Standard deviation of SNR across the clip (dB)."""
-        if self.snr_array is None or len(self.snr_array) == 0:
-            return None
-        return float(np.std(self.snr_array, dtype=np.float32))
-
-    @property
-    def snr_min(self) -> float | None:
-        """Minimum SNR value in the clip (dB)."""
-        if self.snr_array is None or len(self.snr_array) == 0:
-            return None
-        return float(np.min(self.snr_array))
-
-    @property
-    def snr_max(self) -> float | None:
-        """Maximum SNR value in the clip (dB)."""
-        if self.snr_array is None or len(self.snr_array) == 0:
-            return None
-        return float(np.max(self.snr_array))
-
-    # --- C50 properties ---
-
-    @property
-    def c50_mean(self) -> float | None:
-        """Mean C50 clarity across the clip (dB), or None if not available."""
-        if self.c50_array is None or len(self.c50_array) == 0:
-            return None
-        return float(np.mean(self.c50_array, dtype=np.float32))
-
-    @property
-    def c50_std(self) -> float | None:
-        """Standard deviation of C50 across the clip (dB)."""
-        if self.c50_array is None or len(self.c50_array) == 0:
-            return None
-        return float(np.std(self.c50_array, dtype=np.float32))
-
-    @property
-    def c50_min(self) -> float | None:
-        if self.c50_array is None or len(self.c50_array) == 0:
-            return None
-        return float(np.min(self.c50_array))
-
-    @property
-    def c50_max(self) -> float | None:
-        if self.c50_array is None or len(self.c50_array) == 0:
-            return None
-        return float(np.max(self.c50_array))
 
     # --- Noise properties ---
 
@@ -353,38 +311,24 @@ class Clip:
             "adult_speech_duration": round(self.adult_speech_duration, 3),
             "child_fraction": round(self.child_fraction, 3),
             "dominant_label": self.dominant_label,
-            "label_durations": {k: round(v, 3) for k, v in self.label_durations.items()},
-            "vad_coverage_by_label": {k: round(v, 3) for k, v in self.vad_coverage_by_label().items()},
+            "label_durations": {
+                k: round(v, 3) for k, v in self.label_durations.items()
+            },
+            "vad_coverage_by_label": {
+                k: round(v, 3) for k, v in self.vad_coverage_by_label().items()
+            },
             # VAD stats
             "vad_speech_duration": round(self.vad_speech_duration, 3),
             "vad_speech_density": round(self.vad_density, 3),
             "n_vad_segments": len(self.vad_segments),
             # Agreement
             "vad_vtc_iou": round(self.vad_vtc_iou, 3),
-            # SNR (from Brouhaha)
-            "snr_mean": round(self.snr_mean, 1) if self.snr_mean is not None else None,
-            "snr_std": round(self.snr_std, 1) if self.snr_std is not None else None,
-            "snr_min": round(self.snr_min, 1) if self.snr_min is not None else None,
-            "snr_max": round(self.snr_max, 1) if self.snr_max is not None else None,
-            "snr_step_s": self.snr_step_s if self.snr_array is not None else None,
-            "snr": (
-                [round(float(v), 1) for v in self.snr_array]
-                if self.snr_array is not None else None
-            ),
-            # C50 clarity (from Brouhaha)
-            "c50_mean": round(self.c50_mean, 1) if self.c50_mean is not None else None,
-            "c50_std": round(self.c50_std, 1) if self.c50_std is not None else None,
-            "c50_min": round(self.c50_min, 1) if self.c50_min is not None else None,
-            "c50_max": round(self.c50_max, 1) if self.c50_max is not None else None,
-            "c50": (
-                [round(float(v), 1) for v in self.c50_array]
-                if self.c50_array is not None else None
-            ),
             # Noise classification (from PANNs)
             "dominant_noise": self.dominant_noise,
             "noise_profile": (
                 {k: round(v, 4) for k, v in self.noise_profile.items()}
-                if self.noise_profile is not None else None
+                if self.noise_profile is not None
+                else None
             ),
             # Segment details (relative timestamps)
             "vad_segments": [
@@ -421,8 +365,9 @@ def _build_activity_union(
     The result represents all times where audio is "active" (speech or
     vocalisation) — cutting here should be avoided.
     """
-    all_segs = [(s.onset, s.offset) for s in vtc_segments] + \
-               [(s.onset, s.offset) for s in vad_segments]
+    all_segs = [(s.onset, s.offset) for s in vtc_segments] + [
+        (s.onset, s.offset) for s in vad_segments
+    ]
     if not all_segs:
         return []
 
@@ -502,8 +447,9 @@ def build_clips(
     vad_segments: list[Segment] | None = None,
     file_duration: float = 0.0,
     max_clip_s: float = 600.0,
-    split_search_s: float = 120.0,
+    split_search_s: float = 180.0, # size of the search window
     min_gap_s: float = 10.0,
+    snap_to_chunk_grid: bool = True,
 ) -> tuple[list[Clip], dict[str, int]]:
     """Tile a full audio file into clips of roughly equal length.
 
@@ -528,6 +474,14 @@ def build_clips(
         cut point (default 120 = 2 minutes).
     min_gap_s : float
         Silence gaps ≥ this length are strongly preferred (default 10 s).
+
+    snap_to_chunk_grid : bool
+        When *True* (default), snap every interior cut boundary to the
+        nearest multiple of the segma chunk step (3.98 s).  This ensures
+        that the model's 4-second analysis windows align with those used
+        during full-file inference, so VTC predictions on clips are
+        bit-identical to full-file predictions.  The maximum shift is
+        ±1.99 s.
 
     Returns
     -------
@@ -556,17 +510,21 @@ def build_clips(
         clip = Clip(abs_onset=0.0, abs_offset=file_duration)
         for s in vad_segments:
             if s.offset > 0 and s.onset < file_duration:
-                clip.vad_segments.append(Segment(
-                    onset=max(s.onset, 0.0),
-                    offset=min(s.offset, file_duration),
-                ))
+                clip.vad_segments.append(
+                    Segment(
+                        onset=max(s.onset, 0.0),
+                        offset=min(s.offset, file_duration),
+                    )
+                )
         for s in vtc_segments:
             if s.offset > 0 and s.onset < file_duration:
-                clip.vtc_segments.append(Segment(
-                    onset=max(s.onset, 0.0),
-                    offset=min(s.offset, file_duration),
-                    label=s.label,
-                ))
+                clip.vtc_segments.append(
+                    Segment(
+                        onset=max(s.onset, 0.0),
+                        offset=min(s.offset, file_duration),
+                        label=s.label,
+                    )
+                )
         return [clip], tier_counts
 
     # --- Place cut boundaries ---
@@ -590,15 +548,17 @@ def build_clips(
            warning).
         """
         window_start = max(ideal_pos - split_search_s, prev + 1.0)
-        window_end = min(ideal_pos + split_search_s, prev + max_clip_s,
-                         file_duration - 1.0)
+        window_end = min(
+            ideal_pos + split_search_s, prev + max_clip_s, file_duration - 1.0
+        )
 
         if window_start >= window_end:
             cut = min(prev + max_clip_s, file_duration)
             log.warning(
-                "degenerate window at %.1fs (prev=%.1f, ideal=%.1f) — "
-                "forced cut",
-                cut, prev, ideal_pos,
+                "degenerate window at %.1fs (prev=%.1f, ideal=%.1f) — " "forced cut",
+                cut,
+                prev,
+                ideal_pos,
             )
             return cut, "degenerate_window"
 
@@ -606,7 +566,7 @@ def build_clips(
             """Pick gap whose midpoint is closest to ideal."""
             if not gap_list:
                 return None
-            g = min(gap_list, key=lambda g: abs((g[0]+g[1])/2 - ideal_pos))
+            g = min(gap_list, key=lambda g: abs((g[0] + g[1]) / 2 - ideal_pos))
             return (g[0] + g[1]) / 2
 
         # 1–2. Silence gap in full union (prefer long, then any)
@@ -647,7 +607,9 @@ def build_clips(
             log.warning(
                 "cut at %.1fs at speaker boundary inside active audio "
                 "[window %.1f–%.1f]",
-                cut, window_start, window_end,
+                cut,
+                window_start,
+                window_end,
             )
             return cut, "speaker_boundary"
 
@@ -656,7 +618,9 @@ def build_clips(
         log.warning(
             "hard cut at %.1fs — continuous activity, no gaps or "
             "boundaries in [%.1f–%.1f]",
-            cut, window_start, window_end,
+            cut,
+            window_start,
+            window_end,
         )
         return cut, "hard_cut"
 
@@ -673,8 +637,19 @@ def build_clips(
         ideal_step = remaining / n_remaining
         ideal_pos = prev + ideal_step
         cut, tier = _find_cut(prev, ideal_pos)
+        if snap_to_chunk_grid:
+            cut = snap_to_grid(cut, file_duration)
         tier_counts[tier] += 1
         boundaries.append(cut)
+
+    # Deduplicate: snapping can cause two cuts to collapse to the same
+    # grid point.  Keep only strictly increasing boundaries.
+    if snap_to_chunk_grid:
+        deduped: list[float] = [boundaries[0]]
+        for b in boundaries[1:]:
+            if b > deduped[-1]:
+                deduped.append(b)
+        boundaries = deduped
 
     boundaries.append(file_duration)
 
@@ -686,17 +661,21 @@ def build_clips(
 
         for s in vad_segments:
             if s.offset > c_on and s.onset < c_off:
-                clip.vad_segments.append(Segment(
-                    onset=max(s.onset, c_on),
-                    offset=min(s.offset, c_off),
-                ))
+                clip.vad_segments.append(
+                    Segment(
+                        onset=max(s.onset, c_on),
+                        offset=min(s.offset, c_off),
+                    )
+                )
         for s in vtc_segments:
             if s.offset > c_on and s.onset < c_off:
-                clip.vtc_segments.append(Segment(
-                    onset=max(s.onset, c_on),
-                    offset=min(s.offset, c_off),
-                    label=s.label,
-                ))
+                clip.vtc_segments.append(
+                    Segment(
+                        onset=max(s.onset, c_on),
+                        offset=min(s.offset, c_off),
+                        label=s.label,
+                    )
+                )
         clips.append(clip)
 
     return clips, tier_counts

@@ -69,9 +69,7 @@ def _ensure_model(model_path: str) -> str:
         return model_path
 
     if model_path != _DEFAULT_MODEL:
-        raise FileNotFoundError(
-            f"Brouhaha checkpoint not found: {model_path}"
-        )
+        raise FileNotFoundError(f"Brouhaha checkpoint not found: {model_path}")
 
     logger.info("Brouhaha checkpoint not found — downloading from Hugging Face …")
     from scripts.download_brouhaha import ensure_brouhaha_checkpoint
@@ -88,22 +86,29 @@ def _ensure_model(model_path: str) -> str:
 def _extract_brouhaha(
     pipeline,
     audio_path: Path,
-) -> tuple[np.ndarray, np.ndarray, float]:
-    """Run Brouhaha on one file and return (raw_snr, raw_c50, step_s).
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Run Brouhaha on one file and return (raw_vad, raw_snr, raw_c50, step_s).
 
     Returns
     -------
+    raw_vad : 1-D float32 array of per-frame VAD probability [0, 1].
     raw_snr : 1-D float32 array of per-frame SNR values (dB).
     raw_c50 : 1-D float32 array of per-frame C50 clarity values (dB).
     step_s  : Frame step in seconds (from the model's receptive field).
     """
     file = {"uri": audio_path.stem, "audio": str(audio_path)}
-    output = pipeline(file)
-    snr: np.ndarray = output["snr"]  # (n_frames,) float
-    c50: np.ndarray = output["c50"]  # (n_frames,) float
+
+    # Run the underlying segmentation model directly to get all 3 outputs
+    # (vad_prob, snr, c50) instead of going through the pipeline's apply()
+    # which only returns snr and c50.
+    seg = pipeline._segmentation
+    segmentations = seg(file)
+    data = segmentations.data  # (n_frames, 3): [vad_prob, snr, c50]
+    vad: np.ndarray = data[:, 0]
+    snr: np.ndarray = data[:, 1]
+    c50: np.ndarray = data[:, 2]
 
     # Resolve the frame step from the underlying model
-    seg = pipeline._segmentation
     if hasattr(seg.model, "receptive_field"):
         step_s = float(seg.model.receptive_field.step)  # type: ignore[union-attr]
     elif hasattr(seg.model, "introspection"):
@@ -113,25 +118,37 @@ def _extract_brouhaha(
     else:
         # Fallback: estimate from output length and audio duration
         import soundfile as sf
+
         info = sf.info(str(audio_path))
         step_s = info.duration / max(len(snr), 1)
 
-    return snr.astype(np.float32), c50.astype(np.float32), step_s
+    return (
+        vad.astype(np.float32),
+        snr.astype(np.float32),
+        c50.astype(np.float32),
+        step_s,
+    )
 
 
 # Keep backward-compatible alias
 def _extract_snr(
-    pipeline, audio_path: Path,
+    pipeline,
+    audio_path: Path,
 ) -> tuple[np.ndarray, float]:
     """Backward-compatible wrapper — returns (snr, step_s) only."""
-    snr, _c50, step_s = _extract_brouhaha(pipeline, audio_path)
+    _vad, snr, _c50, step_s = _extract_brouhaha(pipeline, audio_path)
     return snr, step_s
+
+
+# VAD threshold for speech-masked SNR/C50 pooling
+_VAD_THRESHOLD = 0.5
 
 
 def pool_snr(
     raw_snr: np.ndarray,
     step_s: float,
     pool_window_s: float = 1.0,
+    speech_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, float]:
     """Average-pool raw per-frame SNR into fixed-width windows.
 
@@ -140,29 +157,53 @@ def pool_snr(
     raw_snr : 1-D float32 array, one value per model frame.
     step_s  : Model frame step in seconds.
     pool_window_s : Averaging window in seconds.
+    speech_mask : optional 1-D bool array (same length as *raw_snr*).
+        When provided, only frames where ``speech_mask`` is True are
+        averaged.  Bins with zero speech frames become NaN.
 
     Returns
     -------
     pooled : 1-D float16 array, one value per pool window.
+             Bins without speech frames are NaN when *speech_mask* is used.
     pool_step_s : Effective step of the pooled array (= pool_window_s).
     """
     frames_per_window = max(1, int(round(pool_window_s / step_s)))
 
     n = len(raw_snr)
-    # Number of full windows
     n_windows = n // frames_per_window
     if n_windows == 0:
-        # File shorter than one window — average everything
-        return np.array([raw_snr.mean()], dtype=np.float16), pool_window_s
+        if speech_mask is not None:
+            m = speech_mask[:n]
+            val = float(raw_snr[m].mean()) if m.any() else float("nan")
+        else:
+            val = float(raw_snr.mean())
+        return np.array([val], dtype=np.float16), pool_window_s
 
-    # Trim to full windows and reshape
     trimmed = raw_snr[: n_windows * frames_per_window]
-    pooled = trimmed.reshape(n_windows, frames_per_window).mean(axis=1)
+    reshaped = trimmed.reshape(n_windows, frames_per_window)
 
-    # If there's a leftover tail, average it into one final bin
+    if speech_mask is not None:
+        mask_trimmed = speech_mask[: n_windows * frames_per_window]
+        mask_reshaped = mask_trimmed.reshape(n_windows, frames_per_window)
+        # Replace non-speech frames with NaN so they don't affect mean
+        masked = np.where(mask_reshaped, reshaped, np.nan)
+        with np.errstate(all="ignore"):
+            pooled = np.nanmean(masked, axis=1).astype(np.float32)
+    else:
+        pooled = reshaped.mean(axis=1)
+
+    # Leftover tail
     leftover = raw_snr[n_windows * frames_per_window :]
     if len(leftover) > 0:
-        pooled = np.append(pooled, leftover.mean())
+        if speech_mask is not None:
+            m = speech_mask[n_windows * frames_per_window :]
+            if m.any():
+                tail_val = float(np.mean(leftover[m]))
+            else:
+                tail_val = float("nan")
+        else:
+            tail_val = float(leftover.mean())
+        pooled = np.append(pooled, tail_val)
 
     return pooled.astype(np.float16), pool_window_s
 
@@ -180,8 +221,10 @@ def main(
     array_id: int | None = None,
     array_count: int | None = None,
     sample: int | float | None = None,
+    force: bool = False,
 ):
     import warnings
+
     # Suppress PyTorch TF32 deprecation warning from set_seeds()
     warnings.filterwarnings("ignore", message=".*TF32.*deprecated.*")
     set_seeds(42)
@@ -206,9 +249,7 @@ def main(
 
     if array_id is not None and array_count is not None:
         file_ids = shard_list(file_ids, array_id, array_count)
-        logger.info(
-            f"Shard {array_id}/{array_count - 1}: {len(file_ids)} files"
-        )
+        logger.info(f"Shard {array_id}/{array_count - 1}: {len(file_ids)} files")
 
     shard_id = array_id if array_id is not None else 0
 
@@ -224,14 +265,17 @@ def main(
     meta_path = meta_dir / f"shard_{shard_id}.parquet"
     prev_meta_df: pl.DataFrame | None = None
 
-    # Check all shard metas for already-processed files
-    all_meta_files = sorted(meta_dir.glob("shard_*.parquet"))
-    if all_meta_files:
-        all_meta = pl.read_parquet(all_meta_files)
-        completed_uids = set(all_meta["uid"].to_list())
+    if not force:
+        # Check all shard metas for already-processed files
+        all_meta_files = sorted(meta_dir.glob("shard_*.parquet"))
+        if all_meta_files:
+            all_meta = pl.read_parquet(all_meta_files)
+            completed_uids = set(all_meta["uid"].to_list())
 
-    if meta_path.exists():
-        prev_meta_df = pl.read_parquet(meta_path)
+        if meta_path.exists():
+            prev_meta_df = pl.read_parquet(meta_path)
+    else:
+        logger.info("Force mode: re-processing all files")
 
     remaining = [uid for uid in file_ids if uid not in completed_uids]
     if len(remaining) < len(file_ids):
@@ -251,6 +295,7 @@ def main(
     import soundfile as sf
     import torch
     from src.compat import patch_torchaudio
+
     patch_torchaudio()
 
     # Silence noisy third-party warnings during model load:
@@ -259,8 +304,14 @@ def main(
     #   - pyannote version-mismatch warnings (bare print)
     #   - brouhaha "Using default parameters" (bare print)
     import io
-    for _mod in ("speechbrain", "pytorch_lightning", "lightning",
-                 "lightning.fabric", "lightning_fabric"):
+
+    for _mod in (
+        "speechbrain",
+        "pytorch_lightning",
+        "lightning",
+        "lightning.fabric",
+        "lightning_fabric",
+    ):
         logging.getLogger(_mod).setLevel(logging.WARNING)
 
     from pyannote.audio import Model
@@ -338,63 +389,76 @@ def main(
         audio_path = Path(uid_to_path[uid])
 
         try:
-            raw_snr, raw_c50, step_s = _extract_brouhaha(pipeline, audio_path)
-            pooled_snr, pool_step = pool_snr(raw_snr, step_s, pool_window)
-            pooled_c50, _ = pool_snr(raw_c50, step_s, pool_window)
+            raw_vad, raw_snr, raw_c50, step_s = _extract_brouhaha(pipeline, audio_path)
+            speech_mask = raw_vad > _VAD_THRESHOLD
+            n_speech = int(speech_mask.sum())
 
-            # Save pooled SNR + C50
+            # Save raw per-frame arrays (float16 for compact storage).
+            # Downstream code indexes directly by onset/offset using step_s,
+            # giving exact per-segment stats regardless of segment duration.
             np.savez_compressed(
                 snr_dir / f"{uid}.npz",
-                snr=pooled_snr,
-                c50=pooled_c50,
-                pool_step_s=np.float32(pool_step),
-                model_step_s=np.float32(step_s),
-                n_raw_frames=np.int32(len(raw_snr)),
+                snr=raw_snr.astype(np.float16),
+                c50=raw_c50.astype(np.float16),
+                vad=raw_vad.astype(np.float16),
+                step_s=np.float32(step_s),
+                vad_threshold=np.float32(_VAD_THRESHOLD),
             )
 
             info = sf.info(str(audio_path))
             file_dur = info.duration
 
-            meta_rows.append({
-                "uid": uid,
-                "snr_status": "ok",
-                "duration": round(file_dur, 3),
-                "n_raw_frames": len(raw_snr),
-                "n_pooled_frames": len(pooled_snr),
-                "model_step_s": round(step_s, 6),
-                "pool_step_s": round(pool_step, 6),
-                "snr_mean": round(float(raw_snr.mean()), 2),
-                "snr_std": round(float(raw_snr.std()), 2),
-                "snr_min": round(float(raw_snr.min()), 2),
-                "snr_max": round(float(raw_snr.max()), 2),
-                "c50_mean": round(float(raw_c50.mean()), 2),
-                "c50_std": round(float(raw_c50.std()), 2),
-                "c50_min": round(float(raw_c50.min()), 2),
-                "c50_max": round(float(raw_c50.max()), 2),
-                "error": "",
-            })
+            # Metadata: report speech-masked stats
+            speech_snr = raw_snr[speech_mask] if n_speech > 0 else raw_snr
+            speech_c50 = raw_c50[speech_mask] if n_speech > 0 else raw_c50
+            speech_frac = n_speech / len(raw_snr) if len(raw_snr) > 0 else 0.0
+
+            meta_rows.append(
+                {
+                    "uid": uid,
+                    "snr_status": "ok",
+                    "duration": round(file_dur, 3),
+                    "n_raw_frames": len(raw_snr),
+                    "n_speech_frames": n_speech,
+                    "speech_fraction": round(speech_frac, 4),
+                    "step_s": round(step_s, 6),
+                    "vad_threshold": _VAD_THRESHOLD,
+                    "snr_mean": round(float(speech_snr.mean()), 2),
+                    "snr_std": round(float(speech_snr.std()), 2),
+                    "snr_min": round(float(speech_snr.min()), 2),
+                    "snr_max": round(float(speech_snr.max()), 2),
+                    "c50_mean": round(float(speech_c50.mean()), 2),
+                    "c50_std": round(float(speech_c50.std()), 2),
+                    "c50_min": round(float(speech_c50.min()), 2),
+                    "c50_max": round(float(speech_c50.max()), 2),
+                    "error": "",
+                }
+            )
 
         except Exception as e:
             n_errors += 1
             logger.warning(f"{uid}: {e}")
-            meta_rows.append({
-                "uid": uid,
-                "snr_status": "error",
-                "duration": 0.0,
-                "n_raw_frames": 0,
-                "n_pooled_frames": 0,
-                "model_step_s": 0.0,
-                "pool_step_s": 0.0,
-                "snr_mean": 0.0,
-                "snr_std": 0.0,
-                "snr_min": 0.0,
-                "snr_max": 0.0,
-                "c50_mean": 0.0,
-                "c50_std": 0.0,
-                "c50_min": 0.0,
-                "c50_max": 0.0,
-                "error": str(e),
-            })
+            meta_rows.append(
+                {
+                    "uid": uid,
+                    "snr_status": "error",
+                    "duration": 0.0,
+                    "n_raw_frames": 0,
+                    "n_speech_frames": 0,
+                    "speech_fraction": 0.0,
+                    "step_s": 0.0,
+                    "vad_threshold": float(_VAD_THRESHOLD),
+                    "snr_mean": 0.0,
+                    "snr_std": 0.0,
+                    "snr_min": 0.0,
+                    "snr_max": 0.0,
+                    "c50_mean": 0.0,
+                    "c50_std": 0.0,
+                    "c50_min": 0.0,
+                    "c50_max": 0.0,
+                    "error": str(e),
+                }
+            )
 
         bytes_done += file_sizes.get(uid, 0)
         now = time.time()
@@ -466,10 +530,13 @@ def main(
                 f"  SNR       : mean={ok['snr_mean'].mean():.1f} dB  "
                 f"std={ok['snr_std'].mean():.1f} dB"
             )
-            logger.info(
-                f"  Pooled    : {ok['n_pooled_frames'].sum():,} frames "
-                f"({pool_window}s windows)"
-            )
+            step_col = "step_s" if "step_s" in ok.columns else "model_step_s"
+            if step_col in ok.columns:
+                step_ms = float(ok[step_col].mean()) * 1000  # type: ignore
+                logger.info(
+                    f"  Frames    : {ok['n_raw_frames'].sum():,} raw frames "
+                    f"(~{step_ms:.1f} ms step)"
+                )
     logger.info(f"  Wall time : {hhmmss(wall)}")
     logger.info(f"{'─' * 50}")
 
@@ -536,6 +603,11 @@ if __name__ == "__main__":
         help="Total SLURM array tasks",
     )
     add_sample_argument(parser)
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-process all files, ignoring resume state",
+    )
 
     args = parser.parse_args()
     main(**vars(args))

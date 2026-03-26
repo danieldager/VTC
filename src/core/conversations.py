@@ -2,10 +2,12 @@
 
 Definitions
 -----------
-**Turn** — A contiguous block of VTC activity surrounded by >``min_gap_s``
-of silence.  VTC segments separated by ≤``min_gap_s`` are merged into the
-same turn.  Each turn has a *dominant label* (the label contributing the
-most speech duration) and records which individual VTC segments compose it.
+**Turn** — A contiguous block of VTC activity from a **single speaker
+label**, bounded by either a gap >``min_gap_s`` of silence or a change of
+label.  Only consecutive segments sharing the same label and separated by
+≤``min_gap_s`` are merged into the same turn.  A different label always
+starts a new turn, even with zero gap (simultaneous speech).  Each turn's
+``label`` is the single VTC speaker class for that turn.
 
 **Conversation** — A sequence of ≥1 turns where consecutive turns are
 separated by <``max_silence_s``.  Conversations capture stretches of
@@ -109,7 +111,11 @@ def detect_turns(
     vtc_segments: list,
     min_gap_s: float = 0.3,
 ) -> list[Turn]:
-    """Detect turns by merging VTC segments within *min_gap_s*.
+    """Detect turns by merging same-label VTC segments within *min_gap_s*.
+
+    A turn is a maximal run of VTC segments that share the same label and
+    whose consecutive gaps are all ≤ *min_gap_s*.  A label change always
+    breaks a turn, even when the two segments are adjacent or overlapping.
 
     Parameters
     ----------
@@ -117,14 +123,14 @@ def detect_turns(
         VTC segments with ``.onset``, ``.offset``, ``.label`` attributes.
         Need not be sorted.
     min_gap_s : float
-        Maximum silence gap (seconds) between VTC segments that still
-        counts as the "same turn".  Gaps > min_gap_s start a new turn.
+        Maximum silence gap (seconds) between same-label VTC segments that
+        still counts as the same turn.  Gaps > min_gap_s start a new turn.
 
     Returns
     -------
     list[Turn]
-        Sorted chronologically.  Each turn's ``label`` is the speaker
-        with the most total duration within the turn.
+        Sorted chronologically.  Each turn has a single ``label``
+        (the speaker class of all its constituent segments).
     """
     if not vtc_segments:
         return []
@@ -137,12 +143,14 @@ def detect_turns(
 
     for seg in segs[1:]:
         prev_end = max(s.offset for s in group)
-        if seg.onset - prev_end > min_gap_s:
-            # Gap too large → flush current group as a turn
+        same_label = seg.label == group[0].label
+        within_gap = seg.onset - prev_end <= min_gap_s
+        if same_label and within_gap:
+            group.append(seg)
+        else:
+            # Label change or gap too large → flush current group as a turn
             turns.append(_group_to_turn(group))
             group = [seg]
-        else:
-            group.append(seg)
 
     # Flush final group
     turns.append(_group_to_turn(group))

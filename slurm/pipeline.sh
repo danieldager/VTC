@@ -5,7 +5,9 @@
 #  VAD, VTC, SNR, and Noise are independent and launch simultaneously.
 #  Package depends on all four and also runs VAD–VTC comparison internally.
 #
-#  GPU budget: VTC(3) + SNR(1) + Noise(1) = 5 GPUs max.
+#  Preflight auto-detects GPU hardware and dataset stats to set:
+#    - VTC batch size (tuned to GPU VRAM)
+#    - Array counts for VTC / SNR / Noise (tuned to dataset size + GPU count)
 #
 #  Both VAD and VTC use a fixed 0.5 sigmoid threshold.
 #
@@ -13,14 +15,14 @@
 #    bash slurm/threshold_analysis.sh seedlings_1 --sample 0.05
 #
 #  Usage:
-#    bash slurm/full_pipeline.sh seedlings_1
-#    bash slurm/full_pipeline.sh seedlings_10 --sample 0.5
+#    bash slurm/pipeline.sh seedlings_1
+#    bash slurm/pipeline.sh seedlings_10 --sample 0.5
 # ==========================================================================
 
 set -euo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
-DATASET="${1:?Usage: bash slurm/full_pipeline.sh DATASET [--sample N]}"
+DATASET="${1:?Usage: bash slurm/pipeline.sh DATASET [--sample N]}"
 shift
 
 SAMPLE=""
@@ -34,18 +36,41 @@ done
 EXTRA_ARGS=""
 [[ -n "$SAMPLE" ]] && EXTRA_ARGS="--sample $SAMPLE"
 
-VTC_ARRAY_COUNT=2
-SNR_ARRAY_COUNT=2
-NOISE_ARRAY_COUNT=2
 VTC_THRESHOLD=0.5          # fixed sigmoid threshold — no adaptive sweep
 
 mkdir -p logs/{vad,vtc,snr,noise,package}
+
+# ---------- Preflight: auto-detect resources ------------------------------
+
+echo ""
+echo "Running preflight resource detection..."
+
+PREFLIGHT_ENV=$(uv run python -m src.pipeline.preflight "$DATASET" \
+    --emit-env $EXTRA_ARGS 2>&1) || {
+    echo "WARNING: preflight failed — using conservative defaults"
+    PREFLIGHT_ENV=""
+}
+
+# Defaults (overridden by preflight if available)
+VTC_BATCH_SIZE=128
+VTC_ARRAY_COUNT=2
+SNR_ARRAY_COUNT=2
+NOISE_ARRAY_COUNT=2
+GPU_NAME="unknown"
+GPU_VRAM_GB=0
+
+# Source preflight output
+if [[ -n "$PREFLIGHT_ENV" ]]; then
+    eval "$PREFLIGHT_ENV"
+fi
 
 echo ""
 echo "╔══════════════════════════════════════════════════════════╗"
 echo "║  Full pipeline: $DATASET"
 echo "║  sample=${SAMPLE:-all}"
-echo "║  GPUs: VTC=$VTC_ARRAY_COUNT  SNR=$SNR_ARRAY_COUNT  Noise=$NOISE_ARRAY_COUNT"
+echo "║  GPU: ${GPU_NAME} (${GPU_VRAM_GB} GB VRAM)"
+echo "║  VTC: batch=${VTC_BATCH_SIZE}  shards=${VTC_ARRAY_COUNT}"
+echo "║  SNR: shards=${SNR_ARRAY_COUNT}  Noise: shards=${NOISE_ARRAY_COUNT}"
 echo "║  VTC threshold=${VTC_THRESHOLD}  (fixed, no sweep)"
 echo "║  VAD + VTC + SNR + Noise run in parallel"
 echo "╚══════════════════════════════════════════════════════════╝"
@@ -64,9 +89,10 @@ VTC_JOB=$(sbatch --parsable \
     --array="${VTC_ARRAY}" \
     slurm/vtc.slurm "$DATASET" \
         --threshold "$VTC_THRESHOLD" \
+        --batch_size "$VTC_BATCH_SIZE" \
         $EXTRA_ARGS)
 
-echo "  2. VTC            : $VTC_JOB  (array ${VTC_ARRAY})"
+echo "  2. VTC            : $VTC_JOB  (array ${VTC_ARRAY}, batch=${VTC_BATCH_SIZE})"
 
 SNR_ARRAY="0-$((SNR_ARRAY_COUNT - 1))"
 

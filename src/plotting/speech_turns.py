@@ -10,6 +10,70 @@ import polars as pl
 from src.core import LABEL_COLORS, VTC_LABELS
 
 
+# ---------------------------------------------------------------------------
+# Overlap helpers
+# ---------------------------------------------------------------------------
+
+
+def _merge_intervals(segs: np.ndarray) -> list:
+    """Merge overlapping intervals. Input: (n, 2) float64 array sorted by onset."""
+    if len(segs) == 0:
+        return []
+    merged = [[segs[0, 0], segs[0, 1]]]
+    for onset, offset in segs[1:]:
+        if onset <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], offset)
+        else:
+            merged.append([onset, offset])
+    return merged
+
+
+def _intersection_duration(ma: list, mb: list) -> float:
+    """Total intersection length of two sorted non-overlapping interval lists."""
+    total = 0.0
+    i = j = 0
+    while i < len(ma) and j < len(mb):
+        lo = max(ma[i][0], mb[j][0])
+        hi = min(ma[i][1], mb[j][1])
+        if lo < hi:
+            total += hi - lo
+        if ma[i][1] < mb[j][1]:
+            i += 1
+        else:
+            j += 1
+    return total
+
+
+def _compute_label_overlap_minutes(segment_df: pl.DataFrame) -> dict[str, float]:
+    """Total simultaneous speech (minutes) between every pair of VTC labels.
+
+    For each clip, the union of each label's segments is computed, then
+    pairwise intersections are summed.
+    """
+    result: dict[str, float] = {}
+    if len(segment_df) == 0:
+        return result
+    for (_, _), clip_segs in segment_df.group_by(["uid", "clip_idx"]):
+        labels = sorted(clip_segs["label"].unique().to_list())
+        if len(labels) < 2:
+            continue
+        intervals: dict[str, list] = {}
+        for lbl in labels:
+            raw = (
+                clip_segs.filter(pl.col("label") == lbl)
+                .select(["onset", "offset"])
+                .sort("onset")
+                .to_numpy()
+            )
+            intervals[lbl] = _merge_intervals(raw)
+        for i, la in enumerate(labels):
+            for lb in labels[i + 1 :]:
+                ov = _intersection_duration(intervals[la], intervals[lb])
+                key = f"{la}+{lb}"
+                result[key] = result.get(key, 0.0) + ov
+    return {k: v / 60 for k, v in result.items()}
+
+
 def _setup():
     """Lazy matplotlib setup, returns plt module."""
     import matplotlib
@@ -25,6 +89,7 @@ def save_conversation_figures(
     turn_df: pl.DataFrame,
     conversation_df: pl.DataFrame,
     transition_df: pl.DataFrame,
+    segment_df: pl.DataFrame,
     output_path: Path,
 ) -> None:
     """Conversational structure dashboard — 3×3 panels."""
@@ -142,22 +207,38 @@ def save_conversation_figures(
     h_conv = float(conv_df["duration"].sum()) / 3600 if n_conv > 0 else 0.0
     h_mono = float(mono_df["duration"].sum()) / 3600 if n_mono > 0 else 0.0
     x = np.array([0, 1])
-    bars = ax.bar(x, [n_conv, n_mono], color=["#4C72B0", "#CCB974"], width=0.5,
-                  edgecolor="white", alpha=0.8)
+    bars = ax.bar(
+        x,
+        [n_conv, n_mono],
+        color=["#4C72B0", "#CCB974"],
+        width=0.5,
+        edgecolor="white",
+        alpha=0.8,
+    )
     ax.set_xticks(x)
-    ax.set_xticklabels([f"Conversations\n({h_conv:.1f}h)", f"Monologues\n({h_mono:.1f}h)"])
+    ax.set_xticklabels(
+        [f"Conversations\n({h_conv:.1f}h)", f"Monologues\n({h_mono:.1f}h)"]
+    )
     ax.set_ylabel("Count")
     for bar, val in zip(bars, [n_conv, n_mono]):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(n_conv, n_mono) * 0.01,
-                str(val), ha="center", fontsize=9)
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + max(n_conv, n_mono) * 0.01,
+            str(val),
+            ha="center",
+            fontsize=9,
+        )
     ax.set_title("Conversations vs Monologues")
 
     # 6. Conversation duration histogram (multi-speaker only)
     ax = axes[1, 2]
     if len(conv_df) > 0:
         cd = conv_df["duration"].to_numpy()
-        cd_clipped = np.clip(cd, 0, np.percentile(cd, 99))
-        ax.hist(cd_clipped, bins=50, color="#DA8BC3", edgecolor="white", alpha=0.8)
+        p99_cd = float(np.percentile(cd, 99))
+        n_clipped_cd = int((cd > p99_cd).sum())
+        if n_clipped_cd:
+            print(f"  [conv duration multi-speaker] {n_clipped_cd} convs > p99={p99_cd:.1f}s clipped")
+        ax.hist(np.clip(cd, 0, p99_cd), bins=50, color="#DA8BC3", edgecolor="white", alpha=0.8)
         ax.axvline(
             np.median(cd),
             color="red",
@@ -166,33 +247,43 @@ def save_conversation_figures(
             label=f"median={np.median(cd):.1f}s",
         )
         ax.legend(fontsize=8)
-    ax.set_xlabel("Conversation duration (s)")
+        if n_clipped_cd:
+            ax.text(0.98, 0.97, f"{n_clipped_cd} > p99={p99_cd:.0f}s",
+                    transform=ax.transAxes, ha="right", va="top", fontsize=8,
+                    bbox=dict(boxstyle="round", fc="white", alpha=0.7))
+    ax.set_xlabel(f"Conversation duration (s, p99={p99_cd:.0f}s)" if len(conv_df) > 0 else "Conversation duration (s)")
     ax.set_ylabel("Count")
     ax.set_title("Conversation Duration\n(multi-speaker only)")
 
-    # 7. Overlap analysis — segments overlapping in time
+    # 7. Speech overlap — simultaneous speech between speaker pairs
     ax = axes[2, 0]
-    # We approximate overlap from turn n_segments > 1 (multiple speakers in a turn)
-    if len(turn_df) > 0:
-        multi_seg = turn_df.filter(pl.col("n_segments") > 1)
-        single_seg = turn_df.filter(pl.col("n_segments") == 1)
-        ax.bar(
-            ["Single-segment\nturns", "Multi-segment\nturns"],
-            [len(single_seg), len(multi_seg)],
-            color=["#55A868", "#C44E52"],
-            edgecolor="white",
-            alpha=0.8,
+    overlap_min = _compute_label_overlap_minutes(segment_df)
+    if overlap_min:
+        pairs = sorted(overlap_min, key=lambda k: overlap_min[k], reverse=True)
+        vals = [overlap_min[p] for p in pairs]
+        bars = ax.barh(
+            pairs[::-1], vals[::-1], color="#C44E52", edgecolor="white", alpha=0.8
         )
-        for i, v in enumerate([len(single_seg), len(multi_seg)]):
+        x_max = max(vals) if vals else 1
+        for bar, v in zip(bars, vals[::-1]):
             ax.text(
-                i,
-                v + max(len(single_seg), len(multi_seg)) * 0.01,
-                str(v),
-                ha="center",
-                fontsize=9,
+                v + x_max * 0.01,
+                bar.get_y() + bar.get_height() / 2,
+                f"{v:.1f} min",
+                va="center",
+                fontsize=8,
             )
-    ax.set_ylabel("Count")
-    ax.set_title("Turn Complexity\n(multi-segment ≈ overlapping speech)")
+    else:
+        ax.text(
+            0.5,
+            0.5,
+            "No simultaneous speech detected",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
+    ax.set_xlabel("Total simultaneous speech (minutes)")
+    ax.set_title("Speech Overlap by Speaker Pair")
 
     # 8. Silence structure — inter-conversation gap distribution (multi-speaker)
     ax = axes[2, 1]
@@ -220,29 +311,52 @@ def save_conversation_figures(
         c_dur = conv_df["duration"].to_numpy()
         m_dur = mono_df["duration"].to_numpy()
         p99 = np.percentile(np.concatenate([c_dur, m_dur]), 99)
-        ax.hist(np.clip(c_dur, 0, p99), bins=40, alpha=0.5, color="#4C72B0",
-                label=f"Conv (med={np.median(c_dur):.1f}s)", density=True)
-        ax.hist(np.clip(m_dur, 0, p99), bins=40, alpha=0.5, color="#CCB974",
-                label=f"Mono (med={np.median(m_dur):.1f}s)", density=True)
+        ax.hist(
+            np.clip(c_dur, 0, p99),
+            bins=40,
+            alpha=0.5,
+            color="#4C72B0",
+            label=f"Conv (med={np.median(c_dur):.1f}s)",
+            weights=np.ones_like(c_dur) * 100 / len(c_dur),
+        )
+        ax.hist(
+            np.clip(m_dur, 0, p99),
+            bins=40,
+            alpha=0.5,
+            color="#CCB974",
+            label=f"Mono (med={np.median(m_dur):.1f}s)",
+            weights=np.ones_like(m_dur) * 100 / len(m_dur),
+        )
         ax.legend(fontsize=8)
         ax.set_xlabel("Duration (s)")
-        ax.set_ylabel("Density")
+        ax.set_ylabel("% of events")
     elif len(mono_df) > 0:
         m_dur = mono_df["duration"].to_numpy()
-        ax.hist(np.clip(m_dur, 0, np.percentile(m_dur, 99)), bins=40,
-                color="#CCB974", edgecolor="white", alpha=0.8)
+        ax.hist(
+            np.clip(m_dur, 0, np.percentile(m_dur, 99)),
+            bins=40,
+            color="#CCB974",
+            edgecolor="white",
+            alpha=0.8,
+        )
         ax.set_xlabel("Duration (s)")
         ax.set_ylabel("Count")
     # Dominant label counts as text annotation
     if len(mono_df) > 0 and "labels" in mono_df.columns:
-        label_counts = (
-            mono_df.group_by("labels").len()
-            .sort("len", descending=True)
+        label_counts = mono_df.group_by("labels").len().sort("len", descending=True)
+        lines = [
+            f"{r['labels']}: {r['len']}" for r in label_counts.iter_rows(named=True)
+        ]
+        ax.text(
+            0.97,
+            0.97,
+            "By label\n" + "\n".join(lines),
+            transform=ax.transAxes,
+            fontsize=8,
+            va="top",
+            ha="right",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7),
         )
-        lines = [f"{r['labels']}: {r['len']}" for r in label_counts.iter_rows(named=True)]
-        ax.text(0.97, 0.97, "By label\n" + "\n".join(lines),
-                transform=ax.transAxes, fontsize=8, va="top", ha="right",
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7))
     ax.set_title("Monologue vs Conversation Duration")
 
     plt.tight_layout()
@@ -253,7 +367,7 @@ def save_conversation_figures(
 
 
 # =========================================================================
-# Page 3: Boss Page — Turns & Conversations (3×3)
+# Page 3: Turns & Conversations (3×3)
 #   Turn duration per role, conversation duration, turns/conv,
 #   inter-conversation duration, conversation SNR/C50
 # =========================================================================
@@ -285,20 +399,30 @@ def save_boss_figures(
     # 1. Turn duration — all roles overlaid
     ax = axes[0, 0]
     if len(turn_df) > 0:
+        all_d = turn_df["duration"].to_numpy()
+        p99 = float(np.percentile(all_d, 99))
+        n_clipped_total = int((all_d > p99).sum())
         for l in VTC_LABELS:
             d = turn_df.filter(pl.col("label") == l)["duration"].to_numpy()
             if len(d) > 0:
-                d_clip = np.clip(d, 0, 30)
                 ax.hist(
-                    d_clip,
+                    np.clip(d, 0, p99),
                     bins=60,
                     alpha=0.5,
                     color=LABEL_COLORS.get(l, "#999"),
                     label=f"{l} (n={len(d)}, med={np.median(d):.1f}s)",
                     edgecolor="white",
                 )
+        if n_clipped_total:
+            print(
+                f"  [turn duration] {n_clipped_total} turns > p99={p99:.1f}s clipped from overlaid plot"
+            )
         ax.legend(fontsize=7)
-    ax.set_xlabel("Turn duration (s, capped at 30)")
+    ax.set_xlabel(
+        f"Turn duration (s, capped at p99={p99:.0f}s)"
+        if len(turn_df) > 0
+        else "Turn duration (s)"
+    )
     ax.set_ylabel("Count")
     ax.set_title("Turn Duration by Role (overlaid)")
 
@@ -312,9 +436,14 @@ def save_boss_figures(
             else np.array([])
         )
         if len(d) > 0:
-            d_clip = np.clip(d, 0, 30)
+            p99_l = float(np.percentile(d, 99))
+            n_clipped = int((d > p99_l).sum())
+            if n_clipped:
+                print(
+                    f"  [turn duration {l}] {n_clipped} turns > p99={p99_l:.1f}s clipped"
+                )
             ax.hist(
-                d_clip,
+                np.clip(d, 0, p99_l),
                 bins=60,
                 color=LABEL_COLORS.get(l, "#999"),
                 edgecolor="white",
@@ -331,14 +460,19 @@ def save_boss_figures(
             ax.text(
                 0.98,
                 0.95,
-                f"n={len(d)}\nmean={np.mean(d):.1f}s\nstd={np.std(d):.1f}s",
+                f"n={len(d)}\nmean={np.mean(d):.1f}s\nstd={np.std(d):.1f}s"
+                + (f"\n({n_clipped} > p99={p99_l:.0f}s)" if n_clipped else ""),
                 transform=ax.transAxes,
                 ha="right",
                 va="top",
                 fontsize=8,
                 bbox=dict(boxstyle="round", fc="white", alpha=0.7),
             )
-        ax.set_xlabel("Turn duration (s)")
+        ax.set_xlabel(
+            f"Turn duration (s, p99={p99_l:.0f}s)"
+            if len(d) > 0
+            else "Turn duration (s)"
+        )
         ax.set_ylabel("Count")
         ax.set_title(f"Turn Duration — {l}")
 
@@ -346,8 +480,11 @@ def save_boss_figures(
     ax = axes[1, 2]
     if len(conversation_df) > 0:
         cd = conversation_df["duration"].to_numpy()
-        cd_clip = np.clip(cd, 0, min(float(np.percentile(cd, 99)), 300))
-        ax.hist(cd_clip, bins=50, color="#DA8BC3", edgecolor="white", alpha=0.8)
+        p99_cd = float(np.percentile(cd, 99))
+        n_clipped_cd = int((cd > p99_cd).sum())
+        if n_clipped_cd:
+            print(f"  [conv duration] {n_clipped_cd} convs > p99={p99_cd:.1f}s clipped")
+        ax.hist(np.clip(cd, 0, p99_cd), bins=50, color="#DA8BC3", edgecolor="white", alpha=0.8)
         ax.axvline(
             np.median(cd),
             color="red",
@@ -359,14 +496,15 @@ def save_boss_figures(
         ax.text(
             0.98,
             0.95,
-            f"n={len(cd)}\nmean={np.mean(cd):.1f}s\nstd={np.std(cd):.1f}s",
+            f"n={len(cd)}\nmean={np.mean(cd):.1f}s\nstd={np.std(cd):.1f}s"
+            + (f"\n({n_clipped_cd} > p99={p99_cd:.0f}s)" if n_clipped_cd else ""),
             transform=ax.transAxes,
             ha="right",
             va="top",
             fontsize=8,
             bbox=dict(boxstyle="round", fc="white", alpha=0.7),
         )
-    ax.set_xlabel("Conversation duration (s)")
+    ax.set_xlabel(f"Conversation duration (s, p99={p99_cd:.0f}s)" if len(conversation_df) > 0 else "Conversation duration (s)")
     ax.set_ylabel("Count")
     ax.set_title("Conversation Duration")
 
@@ -469,5 +607,3 @@ def save_boss_figures(
     fig.savefig(str(output_path), dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  Figure: {output_path}")
-
-

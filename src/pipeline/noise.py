@@ -67,21 +67,47 @@ logger = logging.getLogger("noise")
 # Speech-related class indices to EXCLUDE from noise classification:
 _SPEECH_INDICES: set[int] = set(range(0, 16))  # classes 0-15 are speech/vocal
 
-# Coarse groupings — each is a set of AudioSet *indices*.
-# We map fine-grained AudioSet classes into ~12 categories.
+# Coarse groupings — each is a set of AudioSet *indices* (0-based, matching the
+# class_labels_indices.csv ordering embedded in the NPZ audioset_names array).
+# Together these 16 categories cover all 511 non-speech AudioSet classes so the
+# residual "other" bucket should always be zero.
 _CATEGORY_MAP: dict[str, set[int]] = {
-    "music":         set(range(137, 285)),        # Music genre + instruments
-    "crying":        {22, 23, 24, 25},            # Crying, baby cry, whimper, wail
-    "laughter":      {16, 17, 18, 19, 20, 21},   # Laughter variants
-    "singing":       {27, 28, 29, 30, 31, 32},   # Singing, choir, chant
-    "tv_radio":      {516, 517, 518, 519, 520},   # Television, Radio, podcast
-    "vehicle":       set(range(300, 320)),         # Vehicle sounds
-    "animal":        set(range(73, 105)),          # Animal sounds
-    "water":         set(range(380, 395)),         # Water, rain, stream
-    "household":     set(range(340, 370)),         # Domestic sounds
-    "impact":        set(range(395, 420)),         # Knock, bang, crash
-    "alarm":         set(range(395, 400)) | {489, 490, 491, 492},  # Alarm, siren
-    "silence":       {494, 495, 496},              # Silence, white noise, static
+    # ── Vocalizations (non-speech) ───────────────────────────────────────
+    "laughter":       set(range(16, 22)),     # 16–21  Laughter, giggle, belly laugh …
+    "crying":         set(range(22, 27)),     # 22–26  Crying, baby cry, whimper, wail, sigh
+    "singing":        set(range(27, 37)),     # 27–36  Singing incl. child singing, rapping
+    # ── Human activity / body sounds ─────────────────────────────────────
+    "human_activity": set(range(37, 72)),     # 37–71  Humming, breath, cough, footsteps,
+                                              #         clapping, cheering, children playing …
+    # ── Animals ──────────────────────────────────────────────────────────
+    "animal":         set(range(72, 137)),    # 72–136 All animal sounds (pets → whale)
+    # ── Music ─────────────────────────────────────────────────────────────
+    "music":          set(range(137, 283)),   # 137–282 Music genres + instruments
+    # ── Natural / outdoor sounds ──────────────────────────────────────────
+    "nature":         set(range(283, 300)),   # 283–299 Wind, rain, thunder, ocean, fire
+    # ── Transport ─────────────────────────────────────────────────────────
+    "vehicle":        set(range(300, 344)),   # 300–343 Boats, cars, trains, aircraft, engine
+    # ── Machinery & tools ─────────────────────────────────────────────────
+    "machinery":      set(range(344, 354)) | set(range(404, 426)),
+                                              # 344–353 Chainsaw, drill, engine variants
+                                              # 404–425 Mechanisms, clock, camera, drill
+    # ── Domestic / household ──────────────────────────────────────────────
+    "household":      set(range(354, 388)),   # 354–387 Doors, kitchen, taps, vacuum …
+    # ── Alarms, signals & electronic beeps ───────────────────────────────
+    "alarm_signal":   set(range(388, 404)) | set(range(481, 500)),
+                                              # 388–403 Alarm, phone, siren, whistle
+                                              # 481–499 Beep, ping, clang, rumble …
+    # ── Impacts, crashes, explosions ─────────────────────────────────────
+    "impact":         set(range(426, 481)),   # 426–480 Gunshot, boom, wood/glass/liquid
+    # ── Silence & synthetic tones ─────────────────────────────────────────
+    "silence":        {500} | set(range(501, 506)),
+                                              # 500     Silence
+                                              # 501–505 Sine wave, chirp tone, pulse …
+    # ── Acoustic environment descriptors ─────────────────────────────────
+    "environment":    set(range(506, 524)),   # 506–523 Inside/outside, reverb, echo,
+                                              #         static, white/pink noise …
+    # ── Media / broadcast ─────────────────────────────────────────────────
+    "tv_radio":       {524, 525, 526},        # 524 Television, 525 Radio, 526 Field rec.
 }
 
 # Reverse map: audioset index → category name.  Unmatched indices become "other".
@@ -148,6 +174,7 @@ def extract_panns(
     audio_path: Path,
     window_s: float = 10.0,
     sr: int = 32000,
+    batch_size: int = 1,
 ) -> tuple[np.ndarray, float]:
     """Run PANNs on an audio file in fixed windows.
 
@@ -157,6 +184,7 @@ def extract_panns(
     audio_path : Path to audio file
     window_s : inference window size in seconds
     sr : sample rate for PANNs (32000 native)
+    batch_size : number of windows to process per forward pass
 
     Returns
     -------
@@ -174,18 +202,21 @@ def extract_panns(
         return np.zeros((0, 527), dtype=np.float32), window_s
 
     # Chunk into windows
-    all_probs = []
+    chunks = []
     for start in range(0, n_samples, window_samples):
         chunk = waveform[start : start + window_samples]
-        # Pad last chunk if short
         if len(chunk) < window_samples:
             chunk = np.pad(chunk, (0, window_samples - len(chunk)))
-        # PANNs expects (batch, samples)
-        chunk_tensor = chunk[np.newaxis, :]
-        probs, _ = at.inference(chunk_tensor)  # (batch, 527), (batch, 2048)
-        all_probs.append(probs[0])  # (527,)
+        chunks.append(chunk)
 
-    return np.array(all_probs, dtype=np.float32), window_s
+    # Process in batches
+    all_probs = []
+    for b_start in range(0, len(chunks), batch_size):
+        batch = np.stack(chunks[b_start : b_start + batch_size])  # (B, samples)
+        probs, _ = at.inference(batch)  # (B, 527), (B, 2048)
+        all_probs.append(probs)
+
+    return np.concatenate(all_probs, axis=0).astype(np.float32), window_s
 
 
 def pool_noise(
@@ -257,6 +288,7 @@ def main(
     dataset: str,
     pool_window: float = 1.0,
     inference_window: float = 10.0,
+    batch_size: int = 0,
     device: str = "cuda",
     array_id: int | None = None,
     array_count: int | None = None,
@@ -331,6 +363,18 @@ def main(
     at = AudioTagging(checkpoint_path=None, device=dev)
     logger.info(f"PANNs CNN14 loaded on {dev}")
 
+    # Auto-detect batch size from GPU VRAM when batch_size <= 0
+    if batch_size <= 0:
+        from src.pipeline.resources import query_local_gpu, recommend_noise_batch_size
+        local_gpu = query_local_gpu()
+        if local_gpu is not None:
+            batch_size = recommend_noise_batch_size(local_gpu.vram_gb)
+            logger.info(f"Auto batch_size={batch_size} for {local_gpu.name} ({local_gpu.vram_gb} GB)")
+        else:
+            batch_size = 1
+            logger.info(f"No GPU detected — using default batch_size={batch_size}")
+    logger.info(f"  batch_size: {batch_size}")
+
     # ------------------------------------------------------------------
     # Process files
     # ------------------------------------------------------------------
@@ -362,6 +406,7 @@ def main(
         try:
             raw_probs, step_s = extract_panns(
                 at, audio_path, window_s=inference_window,
+                batch_size=batch_size,
             )
             pooled_cats, _, pool_step = pool_to_categories(
                 raw_probs, step_s, pool_window,
@@ -546,6 +591,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--device", default="cuda", choices=["cuda", "cpu"],
         help="Device for inference (default: cuda)",
+    )
+    parser.add_argument(
+        "--batch_size", type=int, default=0,
+        help=(
+            "Number of windows per forward pass. "
+            "0 = auto-detect from GPU VRAM (default: 0)."
+        ),
     )
     parser.add_argument("--array_id", type=int, help="SLURM array task ID")
     parser.add_argument("--array_count", type=int, help="Total SLURM array tasks")

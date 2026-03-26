@@ -5,11 +5,17 @@ Preflight check: summarise the dataset before pipeline execution.
 Reports:
   - Number of audio files
   - Total size on disk (with human-readable units)
+  - GPU detection and recommended batch sizes
+  - Array-count allocation for SLURM jobs
   - Estimated wall-clock time for the full pipeline
+
+The ``--emit-env`` flag prints machine-readable KEY=VALUE lines (one per
+line) that ``pipeline.sh`` can ``eval`` to configure its sbatch calls.
 
 Usage:
     python -m src.pipeline.preflight chunks30
     python -m src.pipeline.preflight chunks30 --sample 500
+    eval "$(python -m src.pipeline.preflight chunks30 --emit-env)"
 """
 
 import argparse
@@ -17,6 +23,11 @@ import os
 import sys
 from pathlib import Path
 
+from src.pipeline.resources import (
+    gather_dataset_stats,
+    plan_resources,
+    query_partition_gpus,
+)
 from src.utils import (
     add_sample_argument,
     get_dataset_paths,
@@ -123,6 +134,10 @@ def stat_files(paths: list[str]) -> dict:
     }
 
 
+# Default SLURM partitions to query for GPU info
+_DEFAULT_PARTITIONS = ["erc-dupoux", "gpu-p2", "gpu-p1"]
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -131,14 +146,15 @@ def stat_files(paths: list[str]) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Preflight check — summarise the dataset and estimate pipeline "
-            "duration before submitting any jobs."
+            "Preflight check — summarise the dataset, detect GPU resources, "
+            "and recommend batch sizes / array counts before submitting jobs."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
             "  python -m src.pipeline.preflight chunks30\n"
             "  python -m src.pipeline.preflight chunks30 --sample 500\n"
+            "  eval \"$(python -m src.pipeline.preflight chunks30 --emit-env)\"\n"
         ),
     )
     parser.add_argument(
@@ -148,8 +164,8 @@ def main() -> None:
     parser.add_argument(
         "--vtc-tasks",
         type=int,
-        default=4,
-        help="Number of parallel VTC GPU tasks (default: 4). Affects ETA.",
+        default=None,
+        help="Override VTC GPU array count (default: auto-detect).",
     )
     parser.add_argument(
         "--vad-workers",
@@ -157,42 +173,79 @@ def main() -> None:
         default=48,
         help="Number of parallel VAD CPU workers (default: 48). Affects ETA.",
     )
+    parser.add_argument(
+        "--partitions",
+        default=",".join(_DEFAULT_PARTITIONS),
+        help=(
+            "Comma-separated SLURM partitions to check for GPU info "
+            f"(default: {','.join(_DEFAULT_PARTITIONS)})"
+        ),
+    )
+    parser.add_argument(
+        "--emit-env",
+        action="store_true",
+        help=(
+            "Print only KEY=VALUE lines suitable for eval in shell scripts. "
+            "Suppresses the human-readable report."
+        ),
+    )
     add_sample_argument(parser)
     args = parser.parse_args()
 
     # ---- Resolve manifest ----
     ds = get_dataset_paths(args.dataset)
     df = load_manifest(ds.manifest)
-
-    # ---- Apply sampling if requested ----
     df = sample_manifest(df, args.sample)
-
-    # ---- Resolve audio paths ----
     resolved = df["path"].drop_nulls().to_list()
 
-    # ---- Stat the files ----
+    # ---- Dataset statistics ----
+    dstats = gather_dataset_stats(resolved)
+
+    # ---- Backward-compat stat_files dict ----
     stats = stat_files(resolved)
+
+    # ---- GPU detection ----
+    partitions = [p.strip() for p in args.partitions.split(",")]
+    gpu = query_partition_gpus(partitions)
+
+    # ---- Resource plan ----
+    plan = plan_resources(
+        dstats,
+        gpu,
+        max_vtc_shards=args.vtc_tasks,
+    )
+
+    # ---- Emit machine-readable env and exit ----
+    if args.emit_env:
+        print(f"VTC_BATCH_SIZE={plan.vtc_batch_size}")
+        print(f"VTC_ARRAY_COUNT={plan.vtc_array_count}")
+        print(f"SNR_ARRAY_COUNT={plan.snr_array_count}")
+        print(f"NOISE_ARRAY_COUNT={plan.noise_array_count}")
+        print(f"GPU_NAME={plan.gpu_name}")
+        print(f"GPU_VRAM_GB={plan.gpu_vram_gb}")
+        print(f"DATASET_FILES={dstats.n_found}")
+        print(f"DATASET_BYTES={dstats.total_bytes}")
+        return
 
     # ---- Estimate durations ----
     total_bytes = stats["total_bytes"]
     bench_vad, bench_vtc = _rates_from_benchmarks()
     using_benchmarks = bench_vad is not None or bench_vtc is not None
 
-    # VAD: stored benchmark rate is bytes/s per-worker, scale by actual workers
     vad_per_worker = bench_vad if bench_vad is not None else _DEFAULT_VAD_BYTES_PER_S
     scaled_vad_rate = vad_per_worker * args.vad_workers
     t_vad = total_bytes / scaled_vad_rate if scaled_vad_rate > 0 else 0
 
-    # VTC: stored benchmark rate is bytes/s per-GPU, scale by GPU tasks
     vtc_per_gpu = bench_vtc if bench_vtc is not None else _DEFAULT_VTC_BYTES_PER_S
-    t_vtc = total_bytes / (vtc_per_gpu * args.vtc_tasks) if args.vtc_tasks > 0 else 0
+    vtc_tasks = plan.vtc_array_count
+    t_vtc = total_bytes / (vtc_per_gpu * vtc_tasks) if vtc_tasks > 0 else 0
 
     t_total = t_vad + t_vtc + COMPARE_FIXED_SEC
 
     # ---- Print report ----
     print()
     print("Preflight")
-    print("━" * 50)
+    print("━" * 60)
     print(f"  Dataset  : {args.dataset}")
     print(f"  Manifest : {ds.manifest}")
     if args.sample is not None:
@@ -208,6 +261,29 @@ def main() -> None:
         if stats["missing"] > 10:
             print(f"    ... and {stats['missing'] - 10} more")
     print(f"  Size     : {human_size(stats['total_bytes'])}")
+    if dstats.n_found > 0:
+        print(
+            f"  Per file : min={human_size(dstats.min_bytes)}  "
+            f"mean={human_size(dstats.mean_bytes)}  "
+            f"median={human_size(dstats.median_bytes)}  "
+            f"max={human_size(dstats.max_bytes)}"
+        )
+
+    # ---- GPU & resource plan ----
+    print()
+    print("  GPU resources:")
+    if gpu:
+        print(f"    Node GPU   : {gpu.name} ({gpu.vram_gb} GB) × {gpu.count}")
+    else:
+        print("    Node GPU   : not detected (will use defaults)")
+    print(f"    VTC batch  : {plan.vtc_batch_size}")
+    print(f"    VTC shards : {plan.vtc_array_count}")
+    print(f"    SNR shards : {plan.snr_array_count}")
+    print(f"    Noise shards: {plan.noise_array_count}")
+    for note in plan.notes:
+        print(f"    ▸ {note}")
+
+    # ---- ETA ----
     print()
     print("  Estimated duration:")
     vad_str = human_duration(t_vad)
@@ -215,7 +291,7 @@ def main() -> None:
     cmp_str = human_duration(COMPARE_FIXED_SEC)
     tot_str = human_duration(t_total)
     print(f"    VAD  ({args.vad_workers} workers) : {vad_str}")
-    print(f"    VTC  ({args.vtc_tasks} GPUs)    : {vtc_str}")
+    print(f"    VTC  ({vtc_tasks} GPUs)    : {vtc_str}")
     print(f"    Compare          : {cmp_str}")
     print(f"    {'─' * 28}")
     print(f"    Total            : {tot_str}")
@@ -223,15 +299,10 @@ def main() -> None:
     if using_benchmarks:
         src_vad = "benchmark" if bench_vad else "heuristic"
         src_vtc = "benchmark" if bench_vtc else "heuristic"
-        print(
-            f"  Rates: VAD={src_vad}, VTC={src_vtc}"
-        )
+        print(f"  Rates: VAD={src_vad}, VTC={src_vtc}")
     else:
-        print(
-            "  Rates: heuristic estimates "
-            "(run jobs to calibrate)"
-        )
-    print("━" * 50)
+        print("  Rates: heuristic estimates (run jobs to calibrate)")
+    print("━" * 60)
     print()
 
     # Exit with error if no files found

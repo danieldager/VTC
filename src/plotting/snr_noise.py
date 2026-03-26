@@ -20,21 +20,24 @@ def _setup():
     return plt
 
 
-# Friendly colours for noise categories
+# Colours for the redesigned noise category map.
 _NOISE_COLORS: dict[str, str] = {
-    "music":     "#E24A33",
-    "crying":    "#348ABD",
-    "laughter":  "#FBC15E",
-    "singing":   "#8EBA42",
-    "tv_radio":  "#988ED5",
-    "vehicle":   "#777777",
-    "animal":    "#FFB5B8",
-    "water":     "#55A868",
-    "household": "#C44E52",
-    "impact":    "#8C8C8C",
-    "alarm":     "#CCB974",
-    "silence":   "#64B5CD",
-    "other":     "#B0B0B0",
+    "music": "#E24A33",  # red-orange
+    "crying": "#348ABD",  # medium blue
+    "laughter": "#FBC15E",  # amber yellow
+    "singing": "#8EBA42",  # olive green
+    "tv_radio": "#988ED5",  # purple
+    "vehicle": "#777777",  # gray
+    "animal": "#FF8C42",  # orange
+    "household": "#C44E52",  # dark red
+    "impact": "#8C8C8C",  # medium gray
+    "silence": "#64B5CD",  # light blue
+    "human_activity": "#FFB347",  # peach
+    "nature": "#55A868",  # green
+    "machinery": "#A0826D",  # brown
+    "alarm_signal": "#CCB974",  # gold
+    "environment": "#5B7FA6",  # steel blue
+    "other": "#D3D3D3",  # light gray (fallback)
 }
 
 
@@ -224,230 +227,298 @@ def save_snr_figures(
 # =========================================================================
 
 
+def _horiz_bars(
+    ax,
+    labels: list[str],
+    values: np.ndarray,
+    title: str,
+    xlabel: str,
+    pct: bool = False,
+) -> None:
+    """Draw a horizontal bar chart sorted descending, coloured by category."""
+    order = np.argsort(values)  # ascending → bottom of chart = largest
+    sorted_labels = [labels[i] for i in order]
+    sorted_values = values[order]
+    colors = [_NOISE_COLORS.get(l, "#D3D3D3") for l in sorted_labels]
+
+    bars = ax.barh(
+        sorted_labels, sorted_values, color=colors, edgecolor="white", height=0.7
+    )
+    for bar, val in zip(bars, sorted_values):
+        label_str = (
+            f"{val:.1f}%" if pct else f"{val:.3f}" if val < 0.1 else f"{val:.2f}"
+        )
+        ax.text(
+            bar.get_width() + max(sorted_values) * 0.01,
+            bar.get_y() + bar.get_height() / 2,
+            label_str,
+            va="center",
+            fontsize=8,
+        )
+    ax.set_title(title, fontsize=11, fontweight="bold", pad=6)
+    ax.set_xlabel(xlabel, fontsize=9)
+    ax.tick_params(axis="y", labelsize=9)
+    ax.set_xlim(0, max(sorted_values) * 1.20 if sorted_values.max() > 0 else 1)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+
 def save_noise_figures(
     clip_df: pl.DataFrame,
     segment_df: pl.DataFrame,
     output_path: Path,
+    noise_stats_dir: Path | None = None,
 ) -> None:
-    """Noise environment dashboard — 3×3 panels.
+    """Noise environment — 3 separate horizontal bar-chart panels.
 
-    Only rendered when ``noise_*`` columns are present in clip_df.
+    If *noise_stats_dir* is provided and contains ``category_stats.parquet``
+    (produced by ``src.analysis.noise_stats``), that richer data is used.
+    Otherwise falls back to the clip-level ``noise_*`` columns.
     """
     plt = _setup()
 
-    # Detect available noise columns
+    # ── Attempt to load redesigned category stats ─────────────────────────
+    cat_stats_path = (
+        noise_stats_dir / "category_stats.parquet"
+        if noise_stats_dir is not None
+        else None
+    )
+    if cat_stats_path is not None and cat_stats_path.exists():
+        cat_df = (
+            pl.read_parquet(cat_stats_path)
+            .filter(pl.col("map_version") == "new")
+            .sort("pw_hours", descending=True)
+        )
+        categories = cat_df["category"].to_list()
+        pw_hours = cat_df["pw_hours"].to_numpy().astype(np.float64)
+        mean_prob = cat_df["mean_prob"].to_numpy().astype(np.float64)
+        active_rate = cat_df["active_rate"].to_numpy().astype(np.float64)
+
+        fig, axes = plt.subplots(1, 3, figsize=(22, max(6, len(categories) * 0.55 + 2)))
+        fig.suptitle(
+            "Non-Speech Noise Environment  (PANNs CNN14 — redesigned categories)",
+            fontsize=13,
+            fontweight="bold",
+        )
+
+        _horiz_bars(
+            axes[0], categories, pw_hours, "Probability-weighted hours", "Hours"
+        )
+        _horiz_bars(
+            axes[1],
+            categories,
+            mean_prob,
+            "Mean probability\n(across all 1-s windows)",
+            "Mean P",
+        )
+        _horiz_bars(
+            axes[2],
+            categories,
+            active_rate * 100,
+            "Active rate\n(fraction of windows with P > 0.05)",
+            "% of windows",
+            pct=True,
+        )
+
+        fig.tight_layout(rect=(0, 0, 1, 0.95))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(str(output_path), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Saved: {output_path}")
+        return
+
+    # ── Fallback: clip-level noise_* columns ─────────────────────────────
     noise_cols = [c for c in clip_df.columns if c.startswith("noise_")]
     if not noise_cols:
         return  # no noise data — skip
 
     cat_names = [c.replace("noise_", "") for c in noise_cols]
-
-    fig, axes = plt.subplots(3, 3, figsize=(18, 15))
-    fig.suptitle("Noise Environment (PANNs CNN14)", fontsize=14, fontweight="bold")
-
-    # --- 1. Pie chart: dominant noise category distribution ---
-    ax = axes[0, 0]
-    if "dominant_noise" in clip_df.columns:
-        dom = clip_df.filter(pl.col("dominant_noise") != "?")
-        if len(dom) > 0:
-            counts = dom.group_by("dominant_noise").agg(
-                pl.count().alias("n")
-            ).sort("n", descending=True)
-            labels = counts["dominant_noise"].to_list()
-            sizes = counts["n"].to_list()
-            colors = [_NOISE_COLORS.get(l, "#B0B0B0") for l in labels]
-            wedges, texts, autotexts = ax.pie(
-                sizes, labels=labels, colors=colors,
-                autopct="%1.1f%%", startangle=90,
-                textprops={"fontsize": 8},
-            )
-            for t in autotexts:
-                t.set_fontsize(7)
-    ax.set_title("Dominant Noise Type per Clip")
-
-    # --- 2. Mean probability per category (bar chart) ---
-    ax = axes[0, 1]
-    mean_probs = []
-    for col in noise_cols:
-        vals = clip_df[col].drop_nulls().to_numpy()
-        mean_probs.append(float(np.mean(vals)) if len(vals) > 0 else 0.0)
-    sorted_pairs = sorted(zip(cat_names, mean_probs), key=lambda x: -x[1])
-    sorted_cats, sorted_vals = zip(*sorted_pairs) if sorted_pairs else ([], [])
-    colors = [_NOISE_COLORS.get(c, "#B0B0B0") for c in sorted_cats]
-    bars = ax.barh(
-        list(reversed(sorted_cats)), list(reversed(sorted_vals)),
-        color=list(reversed(colors)), edgecolor="white",
+    mean_probs = np.array(
+        [float(clip_df[c].drop_nulls().mean() or 0) for c in noise_cols]  # type: ignore
     )
-    ax.set_xlabel("Mean probability")
-    ax.set_title("Average Noise Category Probability")
-    ax.set_xlim(0, max(sorted_vals) * 1.15 if sorted_vals else 1)
+    order = np.argsort(mean_probs)[::-1]
+    cat_sorted = [cat_names[i] for i in order]
+    prob_sorted = mean_probs[order]
 
-    # --- 3. Noise vs speech density scatter ---
-    ax = axes[0, 2]
-    # Use the max non-speech category prob as "noise intensity"
-    noise_max = np.zeros(len(clip_df))
-    for col in noise_cols:
-        vals = clip_df[col].fill_null(0).to_numpy()
-        noise_max = np.maximum(noise_max, vals)
-    vtc_dens = clip_df["vtc_density"].to_numpy()
-    ax.scatter(vtc_dens, noise_max, alpha=0.25, s=8, c="#E24A33")
-    ax.set_xlabel("VTC speech density")
-    ax.set_ylabel("Max noise probability")
-    ax.set_title("Speech Density vs Noise Level")
+    fig, ax = plt.subplots(figsize=(12, max(5, len(cat_names) * 0.55 + 2)))
+    fig.suptitle("Noise Environment (PANNs CNN14)", fontsize=13, fontweight="bold")
+    _horiz_bars(ax, cat_sorted, prob_sorted, "Mean clip-level probability", "Mean P")
 
-    # --- 4. Noise category distributions (box plots) ---
-    ax = axes[1, 0]
-    box_data = []
-    box_labels: list[str] = []
-    for cat, col in sorted(
-        zip(cat_names, noise_cols),
-        key=lambda x: -float(clip_df[x[1]].mean() or 0),  # type: ignore[arg-type]
-    ):
-        vals = clip_df[col].drop_nulls().to_numpy()
-        if len(vals) > 0:
-            box_data.append(vals)
-            box_labels.append(cat)
-    if box_data:
-        bp = ax.boxplot(
-            box_data[:8],  # top 8 for readability
-            labels=box_labels[:8],
-            patch_artist=True,
-            widths=0.6,
-            showfliers=False,
-            vert=True,
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(str(output_path), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {output_path}")
+
+
+# =========================================================================
+# Fine-grained noise pie charts
+# =========================================================================
+
+
+def _category_shades(base_hex: str, n: int) -> list:
+    """Return *n* RGBA colours ranging from *base_hex* (darkest) to 50 % lighter."""
+    import matplotlib.colors as mcolors
+
+    r0, g0, b0 = mcolors.to_rgb(base_hex)
+    if n == 1:
+        return [(r0, g0, b0, 1.0)]
+    factors = np.linspace(0, 0.55, n)
+    return [
+        (r0 + (1 - r0) * f, g0 + (1 - g0) * f, b0 + (1 - b0) * f, 1.0) for f in factors
+    ]
+
+
+def save_noise_pie_figures(
+    noise_stats_dir: Path,
+    output_path: Path,
+    top_n: int = 20,
+) -> None:
+    """Big pie charts for fine-grained PANNs noise analysis.
+
+    Produces two pies side-by-side in one figure:
+      * Left  — coarse category breakdown (redesigned map)
+      * Right — top-*top_n* non-speech AudioSet classes by probability-weighted
+                hours, coloured by their parent category; remaining classes
+                shown as a single "Everything else" slice.
+
+    Parameters
+    ----------
+    noise_stats_dir : Path
+        Directory containing ``audioset_stats.parquet`` and
+        ``category_stats.parquet`` (output of ``src.analysis.noise_stats``).
+    output_path : Path
+        Destination PNG file.
+    top_n : int
+        How many AudioSet classes to show individually (default: 20).
+    """
+    as_path = noise_stats_dir / "audioset_stats.parquet"
+    cat_path = noise_stats_dir / "category_stats.parquet"
+    if not as_path.exists() or not cat_path.exists():
+        return
+
+    plt = _setup()
+
+    as_df = (
+        pl.read_parquet(as_path)
+        .filter(~pl.col("is_speech"))
+        .sort("pw_hours", descending=True)
+    )
+    cat_df = (
+        pl.read_parquet(cat_path)
+        .filter(pl.col("map_version") == "new")
+        .sort("pw_hours", descending=True)
+    )
+
+    # ── Coarse category data ──────────────────────────────────────────────
+    coarse_cats = cat_df["category"].to_list()
+    coarse_hours = cat_df["pw_hours"].to_numpy().astype(np.float64)
+    coarse_colors = [_NOISE_COLORS.get(c, "#D3D3D3") for c in coarse_cats]
+
+    # ── Fine-grained: top-N + "Everything else" ───────────────────────────
+    top_df = as_df.head(top_n)
+    rest_h = float(as_df.tail(len(as_df) - top_n)["pw_hours"].sum())
+    n_rest = len(as_df) - top_n
+
+    fine_names = top_df["class_name"].to_list()
+    fine_hours = top_df["pw_hours"].to_numpy().astype(np.float64)
+    fine_cats = top_df["new_category"].to_list()
+
+    # Build shaded colours: same-category classes get adjacent shades
+    # Sort by (category, pw_hours desc) so same-cat slices sit together.
+    group_order: list[tuple[str, str, float]] = sorted(
+        zip(fine_cats, fine_names, fine_hours.tolist()),
+        key=lambda x: (x[0], -x[2]),
+    )
+    from collections import Counter
+
+    cat_counts = Counter(c for c, _, _ in group_order)
+    cat_shade_pos: dict[str, int] = {}
+    fine_colors: list = []
+    for cat, name, _ in group_order:
+        pos = cat_shade_pos.get(cat, 0)
+        shades = _category_shades(_NOISE_COLORS.get(cat, "#D3D3D3"), cat_counts[cat])
+        fine_colors.append(shades[pos])
+        cat_shade_pos[cat] = pos + 1
+
+    sorted_names = [n for _, n, _ in group_order]
+    sorted_hours = np.array([h for _, _, h in group_order])
+    sorted_cats_g = [c for c, _, _ in group_order]
+
+    if rest_h > 0:
+        sorted_names.append(f"Everything else ({n_rest} classes)")
+        sorted_hours = np.append(sorted_hours, rest_h)
+        fine_colors.append((0.82, 0.82, 0.82, 1.0))
+
+    total_fine = sorted_hours.sum()
+    total_coarse = coarse_hours.sum()
+
+    # ── Layout: left pie (coarse) + right pie (fine) ─────────────────────
+    fig = plt.figure(figsize=(26, 13))
+    gs = fig.add_gridspec(1, 2, width_ratios=[1, 1.6], wspace=0.05)
+    ax_coarse = fig.add_subplot(gs[0])
+    ax_fine = fig.add_subplot(gs[1])
+
+    kw_pie = dict(startangle=90, counterclock=False)
+
+    def _draw_pie(ax, hours, labels, colors, title, total):
+        pcts = hours / total * 100
+        wedges, _ = ax.pie(
+            hours,
+            colors=colors,
+            wedgeprops={"linewidth": 0.5, "edgecolor": "white"},
+            **kw_pie,
         )
-        for patch, l in zip(bp["boxes"], box_labels[:8]):
-            patch.set_facecolor(_NOISE_COLORS.get(l, "#999"))
-            patch.set_alpha(0.7)
-        ax.tick_params(axis="x", rotation=45)
-    ax.set_ylabel("Probability")
-    ax.set_title("Noise Category Distributions (Top 8)")
+        ax.set_title(title, fontsize=13, fontweight="bold", pad=14)
 
-    # --- 5. SNR vs dominant noise category (box) ---
-    ax = axes[1, 1]
-    if "dominant_noise" in clip_df.columns and "snr_mean" in clip_df.columns:
-        filtered = clip_df.filter(
-            (pl.col("dominant_noise") != "?") & pl.col("snr_mean").is_not_null()
-        )
-        if len(filtered) > 0:
-            cats_present = (
-                filtered.group_by("dominant_noise")
-                .agg(pl.count().alias("n"))
-                .filter(pl.col("n") >= 5)
-                .sort("n", descending=True)
-                ["dominant_noise"].to_list()[:8]
+        # Legend: only show slices >= 0.8 %
+        legend_entries = [
+            (w, f"{lbl}  ({p:.1f}%)")
+            for w, lbl, p in zip(wedges, labels, pcts)
+            if p >= 0.8
+        ]
+        if legend_entries:
+            leg_wedges, leg_labels = zip(*legend_entries)
+            ax.legend(
+                leg_wedges,
+                leg_labels,
+                loc="lower center",
+                bbox_to_anchor=(0.5, -0.15),
+                ncol=2,
+                fontsize=8.5,
+                frameon=False,
+                handlelength=1.1,
+                handleheight=1.1,
             )
-            box_data_snr = []
-            for cat in cats_present:
-                d = filtered.filter(pl.col("dominant_noise") == cat)["snr_mean"].to_numpy()
-                box_data_snr.append(d)
-            if box_data_snr:
-                bp = ax.boxplot(
-                    box_data_snr,
-                    labels=cats_present,
-                    patch_artist=True,
-                    widths=0.6,
-                    showfliers=False,
-                )
-                for patch, l in zip(bp["boxes"], cats_present):
-                    patch.set_facecolor(_NOISE_COLORS.get(l, "#999"))
-                    patch.set_alpha(0.7)
-                ax.tick_params(axis="x", rotation=45)
-    ax.set_ylabel("Mean SNR (dB)")
-    ax.set_title("SNR by Dominant Noise Type")
+        return wedges
 
-    # --- 6. Noise category co-occurrence heatmap ---
-    ax = axes[1, 2]
-    # Find top categories and check how often they co-occur (both > threshold)
-    top_cats = [c for c, _ in sorted_pairs[:8]]
-    top_cols = [f"noise_{c}" for c in top_cats]
-    avail = [c for c in top_cols if c in clip_df.columns]
-    if len(avail) >= 2:
-        threshold = 0.1
-        cooc = np.zeros((len(avail), len(avail)))
-        for i, c1 in enumerate(avail):
-            v1 = clip_df[c1].fill_null(0).to_numpy()
-            for j, c2 in enumerate(avail):
-                v2 = clip_df[c2].fill_null(0).to_numpy()
-                cooc[i, j] = np.mean((v1 > threshold) & (v2 > threshold))
-        labels_hm = [c.replace("noise_", "") for c in avail]
-        im = ax.imshow(cooc, cmap="YlOrRd", aspect="auto", vmin=0)
-        ax.set_xticks(range(len(labels_hm)))
-        ax.set_xticklabels(labels_hm, rotation=45, ha="right", fontsize=8)
-        ax.set_yticks(range(len(labels_hm)))
-        ax.set_yticklabels(labels_hm, fontsize=8)
-        fig.colorbar(im, ax=ax, shrink=0.8, label="Co-occurrence rate")
-    ax.set_title("Noise Co-occurrence (prob > 0.1)")
+    _draw_pie(
+        ax_coarse,
+        coarse_hours,
+        coarse_cats,
+        coarse_colors,
+        "Non-Speech Noise by Category",
+        total_coarse,
+    )
 
-    # --- 7. Noise level over clip position (are starts/ends noisier?) ---
-    ax = axes[2, 0]
-    # Bin clips into 3rds of their source file and compare noise levels
-    if "abs_onset" in clip_df.columns and len(clip_df) > 10:
-        onsets = clip_df["abs_onset"].to_numpy()
-        thirds = np.digitize(
-            onsets / (onsets.max() + 1), bins=[0, 1 / 3, 2 / 3, 1]
-        )
-        third_labels = ["Start", "Middle", "End"]
-        for cat_name in [c for c, v in sorted_pairs[:4]]:
-            col = f"noise_{cat_name}"
-            if col not in clip_df.columns:
-                continue
-            vals = clip_df[col].fill_null(0).to_numpy()
-            means = [float(np.mean(vals[thirds == t + 1])) if np.sum(thirds == t + 1) > 0 else 0
-                     for t in range(3)]
-            ax.plot(third_labels, means, marker="o", label=cat_name,
-                    color=_NOISE_COLORS.get(cat_name, "#999"))
-        ax.legend(fontsize=7, ncol=2)
-    ax.set_ylabel("Mean probability")
-    ax.set_title("Noise by Recording Position")
+    _draw_pie(
+        ax_fine,
+        sorted_hours,
+        sorted_names,
+        fine_colors,
+        f"Non-Speech Noise by AudioSet Class  (top {top_n})",
+        total_fine,
+    )
 
-    # --- 8. Noise vs child speech fraction ---
-    ax = axes[2, 1]
-    if "child_fraction" in clip_df.columns:
-        cf = clip_df["child_fraction"].to_numpy()
-        ax.scatter(cf, noise_max, alpha=0.25, s=8, c="#348ABD")
-        # Trend line
-        if len(cf) > 5:
-            z = np.polyfit(cf, noise_max, 1)
-            p = np.poly1d(z)
-            xs = np.linspace(0, 1, 100)
-            ax.plot(xs, p(xs), "r--", lw=1, alpha=0.7, label=f"slope={z[0]:.3f}")
-            ax.legend(fontsize=8)
-    ax.set_xlabel("Child speech fraction")
-    ax.set_ylabel("Max noise probability")
-    ax.set_title("Child Speech vs Noise Level")
+    fig.suptitle(
+        "PANNs CNN14 — Probability-weighted hours of non-speech acoustic activity",
+        fontsize=12,
+        y=0.98,
+        color="#444",
+    )
 
-    # --- 9. Stacked bar: noise profile by dominant VTC label ---
-    ax = axes[2, 2]
-    if "dominant_label" in clip_df.columns:
-        for_stack = clip_df.filter(pl.col("dominant_label") != "?")
-        vtc_labels_present = sorted(
-            for_stack["dominant_label"].unique().to_list()
-        )
-        # For each VTC label, compute mean noise category probs
-        bar_bottom = np.zeros(len(vtc_labels_present))
-        render_cats = [c for c, _ in sorted_pairs[:6]]  # top 6 noise cats
-        for cat in render_cats:
-            col = f"noise_{cat}"
-            if col not in clip_df.columns:
-                continue
-            cat_means = []
-            for vtc_l in vtc_labels_present:
-                subset = for_stack.filter(pl.col("dominant_label") == vtc_l)
-                m = subset[col].fill_null(0).mean()
-                cat_means.append(float(m) if m is not None else 0.0)  # type: ignore[arg-type]
-            ax.bar(
-                vtc_labels_present, cat_means, bottom=bar_bottom,
-                color=_NOISE_COLORS.get(cat, "#999"), label=cat,
-                edgecolor="white", linewidth=0.5,
-            )
-            bar_bottom += np.array(cat_means)
-        ax.legend(fontsize=7, loc="upper right")
-    ax.set_ylabel("Mean noise probability")
-    ax.set_title("Noise Profile by Dominant Speaker")
-
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(str(output_path), dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {output_path}")
 
@@ -455,4 +526,3 @@ def save_noise_figures(
 # =========================================================================
 # Convenience: render all pages
 # =========================================================================
-

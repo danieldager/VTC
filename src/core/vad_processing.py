@@ -195,7 +195,6 @@ def process_vad_file(args: tuple) -> tuple[dict, list[dict]]:
                 blocksize=_BLOCK_SAMPLES,
                 dtype="int16",
                 always_2d=True,
-                fill_value=0,
             ):
                 data = block[:, 0] if block.ndim == 2 else block
 

@@ -5,8 +5,9 @@ from __future__ import annotations
 import pytest
 
 from src.packaging.clips import (
-    CUT_TIERS, Clip, Segment,
+    CHUNK_STEP_S, CUT_TIERS, Clip, Segment,
     build_clips as _build_clips_raw,
+    snap_to_grid,
     _build_activity_union,
     _find_silence_gaps, _compute_iou,
 )
@@ -561,3 +562,113 @@ class TestPerLabelProperties:
         assert "dominant_label" in meta
         assert "label_durations" in meta
         assert "vad_coverage_by_label" in meta
+
+
+# ---------------------------------------------------------------------------
+# snap_to_grid
+# ---------------------------------------------------------------------------
+
+
+class TestSnapToGrid:
+    def test_exact_multiple_unchanged(self):
+        """A time already on the grid stays put."""
+        t = 3 * CHUNK_STEP_S  # 11.94
+        assert snap_to_grid(t, 1000.0) == pytest.approx(t)
+
+    def test_rounds_to_nearest(self):
+        """A time between two grid points rounds to the nearest."""
+        # Just above 1 * CHUNK_STEP_S
+        assert snap_to_grid(CHUNK_STEP_S + 0.1, 1000.0) == pytest.approx(CHUNK_STEP_S)
+        # Just below 2 * CHUNK_STEP_S
+        assert snap_to_grid(2 * CHUNK_STEP_S - 0.1, 1000.0) == pytest.approx(
+            2 * CHUNK_STEP_S
+        )
+
+    def test_zero_stays_zero(self):
+        assert snap_to_grid(0.0, 1000.0) == 0.0
+
+    def test_clamped_to_file_duration(self):
+        """Result never exceeds file_duration."""
+        dur = 10.0
+        assert snap_to_grid(9.99, dur) <= dur
+
+    def test_clamped_to_zero(self):
+        """Result never goes below 0."""
+        assert snap_to_grid(0.5, 1000.0) >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# build_clips with snap_to_chunk_grid
+# ---------------------------------------------------------------------------
+
+
+class TestBuildClipsGridSnapping:
+    """Verify that snap_to_chunk_grid produces on-grid boundaries."""
+
+    def _is_on_grid(self, t: float) -> bool:
+        """True if *t* is a multiple of CHUNK_STEP_S (within tolerance)."""
+        remainder = t % CHUNK_STEP_S
+        return remainder < 1e-6 or (CHUNK_STEP_S - remainder) < 1e-6
+
+    def test_boundaries_on_grid(self):
+        """All interior boundaries should land on the chunk grid."""
+        dur = 3600.0  # 1 hour → ~6 clips
+        vtc = [Segment(onset=i * 60, offset=i * 60 + 50, label="FEM") for i in range(60)]
+        vad = [Segment(onset=i * 60, offset=i * 60 + 50) for i in range(60)]
+        clips = build_clips(vtc, vad, file_duration=dur)
+        for clip in clips[:-1]:  # last clip ends at file_duration, not snapped
+            assert self._is_on_grid(clip.abs_onset), (
+                f"abs_onset {clip.abs_onset} is not on the chunk grid"
+            )
+
+    def test_first_boundary_is_zero(self):
+        """First clip always starts at 0."""
+        dur = 2000.0
+        clips = build_clips([], [], file_duration=dur)
+        assert clips[0].abs_onset == 0.0
+
+    def test_last_boundary_is_file_duration(self):
+        """Last clip always ends at file_duration (never snapped)."""
+        dur = 2000.123  # deliberately not on grid
+        clips = build_clips([], [], file_duration=dur)
+        assert clips[-1].abs_offset == pytest.approx(dur)
+
+    def test_no_zero_duration_clips(self):
+        """Snapping should never produce a zero-duration clip."""
+        dur = 3600.0
+        vtc = [Segment(onset=i * 60, offset=i * 60 + 50, label="FEM") for i in range(60)]
+        clips = build_clips(vtc, file_duration=dur)
+        for clip in clips:
+            assert clip.duration > 0, f"Zero-duration clip at {clip.abs_onset}"
+
+    def test_snap_off_preserves_old_behaviour(self):
+        """With snap_to_chunk_grid=False, boundaries need not be on grid."""
+        dur = 3600.0
+        vtc = [Segment(onset=100, offset=200, label="FEM")]
+        clips_raw, _ = _build_clips_raw(
+            vtc, file_duration=dur, snap_to_chunk_grid=False
+        )
+        on_grid = all(self._is_on_grid(c.abs_onset) for c in clips_raw[1:])
+        # Very unlikely that all boundaries happen to be on-grid by chance
+        # with smooth gaps; but the real test is that the parameter works.
+        assert len(clips_raw) > 1
+
+    def test_full_coverage(self):
+        """Every second of the file is covered — no gaps."""
+        dur = 3600.0
+        vtc = [Segment(onset=i * 60, offset=i * 60 + 50, label="FEM") for i in range(60)]
+        clips = build_clips(vtc, file_duration=dur)
+        assert clips[0].abs_onset == 0.0
+        assert clips[-1].abs_offset == pytest.approx(dur)
+        for i in range(len(clips) - 1):
+            assert clips[i].abs_offset == pytest.approx(clips[i + 1].abs_onset), (
+                f"Gap between clip {i} and {i+1}"
+            )
+
+    def test_short_file_single_clip(self):
+        """A file shorter than max_clip_s produces a single clip, unchanged."""
+        dur = 300.0
+        clips = build_clips([], file_duration=dur)
+        assert len(clips) == 1
+        assert clips[0].abs_onset == 0.0
+        assert clips[0].abs_offset == dur

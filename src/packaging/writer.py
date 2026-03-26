@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import io
 import json
+import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -47,6 +49,14 @@ def _encode_audio(
     start_frame = max(0, start_frame)
     stop_frame = min(int(info.frames), stop_frame)
 
+    if start_frame >= stop_frame:
+        raise ValueError(
+            f"Clip [{abs_onset:.3f}s, {abs_offset:.3f}s] is entirely outside "
+            f"the actual audio (duration {info.frames / file_sr:.3f}s). "
+            "This usually means VAD metadata over-reports the file duration. "
+            "Skipping this clip."
+        )
+
     data, sr = sf.read(
         str(audio_path),
         start=start_frame,
@@ -73,6 +83,38 @@ def _encode_audio(
     return buf.getvalue()
 
 
+def _prepare_sample(
+    uid: str,
+    audio_path: Path,
+    clip_idx: int,
+    clip: Clip,
+    audio_fmt: str,
+    target_sr: int,
+) -> dict | None:
+    """Encode audio + build sample dict for one clip (thread-safe)."""
+    clip_id = f"{uid}_{clip_idx:04d}"
+    try:
+        audio_bytes = _encode_audio(
+            audio_path, clip.abs_onset, clip.abs_offset,
+            target_sr=target_sr, fmt=audio_fmt,
+        )
+    except ValueError as e:
+        print(f"  WARN: skipping {clip_id}: {e}", file=sys.stderr)
+        return None
+
+    meta = clip.to_metadata(uid, clip_idx)
+    meta["audio_fmt"] = audio_fmt
+    meta["sample_rate"] = target_sr
+    meta["source_path"] = str(audio_path)
+
+    sample: dict = {
+        "__key__": clip_id,
+        audio_fmt: audio_bytes,
+        "json": json.dumps(meta, ensure_ascii=False).encode("utf-8"),
+    }
+    return sample
+
+
 def write_shards(
     clips: list[tuple[str, Path, int, Clip]],
     output_dir: Path,
@@ -80,8 +122,12 @@ def write_shards(
     max_shard_clips: int = 100,
     audio_fmt: str = "flac",
     target_sr: int = 16_000,
+    workers: int = 8,
 ) -> list[Path]:
     """Write clips into WebDataset tar shards.
+
+    Audio encoding is parallelised across *workers* threads.  Tar writing
+    remains serial (single TarWriter) so shard ordering is deterministic.
 
     Parameters
     ----------
@@ -97,6 +143,8 @@ def write_shards(
         ``"flac"`` or ``"wav"``.
     target_sr : int
         Target sample rate for audio clips.
+    workers : int
+        Number of threads for parallel audio encoding.
 
     Returns
     -------
@@ -111,47 +159,38 @@ def write_shards(
     sink: wds.TarWriter | None = None  # type: ignore[attr-defined]
     count_in_shard = 0
 
+    # Pre-encode audio in parallel, then write to tar sequentially.
+    # We process in batches equal to max_shard_clips to limit memory.
+    batch_size = max(max_shard_clips, workers * 2)
+
     try:
-        for uid, audio_path, clip_idx, clip in clips:
-            # Rotate shards
-            if sink is None or count_in_shard >= max_shard_clips:
-                if sink is not None:
-                    sink.close()
-                shard_path = Path(shard_pattern % shard_idx)
-                shard_paths.append(shard_path)
-                sink = wds.TarWriter(str(shard_path))  # type: ignore[attr-defined]
-                shard_idx += 1
-                count_in_shard = 0
+        for batch_start in range(0, len(clips), batch_size):
+            batch = clips[batch_start : batch_start + batch_size]
 
-            clip_id = f"{uid}_{clip_idx:04d}"
-            meta = clip.to_metadata(uid, clip_idx)
-            meta["audio_fmt"] = audio_fmt
-            meta["sample_rate"] = target_sr
-            meta["source_path"] = str(audio_path)
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [
+                    pool.submit(
+                        _prepare_sample, uid, audio_path, clip_idx, clip,
+                        audio_fmt, target_sr,
+                    )
+                    for uid, audio_path, clip_idx, clip in batch
+                ]
+                samples = [f.result() for f in futures]
 
-            # Encode audio
-            audio_bytes = _encode_audio(
-                audio_path, clip.abs_onset, clip.abs_offset,
-                target_sr=target_sr, fmt=audio_fmt,
-            )
-
-            sample = {
-                "__key__": clip_id,
-                f"{audio_fmt}": audio_bytes,
-                "json": json.dumps(meta, ensure_ascii=False).encode("utf-8"),
-            }
-            # Add SNR array as binary .npy for efficient downstream loading
-            if clip.snr_array is not None:
-                snr_buf = io.BytesIO()
-                np.save(snr_buf, clip.snr_array)
-                sample["snr.npy"] = snr_buf.getvalue()
-            # Add C50 array
-            if clip.c50_array is not None:
-                c50_buf = io.BytesIO()
-                np.save(c50_buf, clip.c50_array)
-                sample["c50.npy"] = c50_buf.getvalue()
-            sink.write(sample)  # type: ignore
-            count_in_shard += 1
+            for sample in samples:
+                if sample is None:
+                    continue
+                # Rotate shards
+                if sink is None or count_in_shard >= max_shard_clips:
+                    if sink is not None:
+                        sink.close()
+                    shard_path = Path(shard_pattern % shard_idx)
+                    shard_paths.append(shard_path)
+                    sink = wds.TarWriter(str(shard_path))  # type: ignore[attr-defined]
+                    shard_idx += 1
+                    count_in_shard = 0
+                sink.write(sample)  # type: ignore
+                count_in_shard += 1
 
     finally:
         if sink is not None:
