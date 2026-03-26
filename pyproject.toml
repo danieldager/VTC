@@ -1,7 +1,7 @@
 [project]
-name = "vtc"
+name = "dlplusplus"
 version = "0.1.0"
-description = "VAD + VTC preprocessing pipeline for long-form child audio recordings"
+description = "DL++ — Feature processing and data loading for child-centered long-form audio"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

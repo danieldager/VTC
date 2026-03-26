@@ -1,19 +1,19 @@
 # Dataloader++ Design Document
 
 > **Status**: Phase 1 — Interface Design  
-> **Authors**: VTC Team  
-> **Last Updated**: 2026-03-25
+> **Authors**: DL++ Team  
+> **Last Updated**: 2026-03-26
 
 ---
 
 ## 1. Motivation
 
-The VTC pipeline (`src/pipeline/`) already functions as a **Feature Processor**: it
+The DL++ pipeline (`src/pipeline/`) already functions as a **Feature Processor**: it
 ingests raw long-form audio, runs GPU-accelerated models (TenVAD, segma, Brouhaha,
 PANNs), and produces rich per-file metadata in standardized formats. The packaging
 step (`src/pipeline/package.py`) tiles files into clips and writes WebDataset shards.
 
-The broader **Dataloader++** initiative at Meta requires a Feature Loader counterpart
+The **Dataloader++** initiative at Meta requires a Feature Loader counterpart
 that can:
 
 1. Load waveforms and pre-computed metadata from these shards (or raw outputs).

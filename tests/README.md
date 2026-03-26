@@ -1,4 +1,4 @@
-# VTC Test Suite
+# DL++ Test Suite
 
 Tests for the `src/core/`, `src/pipeline/`, and `src/packaging/` modules.
 Covers pure interval arithmetic, VAD processing helpers, SNR extraction,

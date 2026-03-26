@@ -1,6 +1,6 @@
-# Voice Type Classifier (VTC) 2.0
+# DL++ (Dataloader++)
 
-A speaker segmentation model that classifies speech into four speaker types (**FEM**, **MAL**, **KCHI**, **OCH**) in child-centered long-form audio recordings. Includes a production-ready SLURM pipeline for processing datasets of any size — from a handful of files to hundreds of thousands.
+A feature processing and data loading framework for child-centered long-form audio recordings. Runs a SLURM pipeline that extracts speech activity, speaker types, signal quality, and environmental noise — then packages everything into WebDataset shards with rich per-clip metadata for model training.
 
 ## Table of Contents
 
@@ -8,9 +8,10 @@ A speaker segmentation model that classifies speech into four speaker types (**F
 2. [Quick Start](#2-quick-start)
 3. [Pipeline](#3-pipeline)
 4. [Project Structure](#4-project-structure)
-5. [Model Performance](#5-model-performance)
+5. [Dataloader](#5-dataloader)
 6. [Citation](#6-citation)
-7. [Acknowledgement](#7-acknowledgement)
+7. [Component Models](#7-component-models)
+8. [Acknowledgements](#8-acknowledgements)
 
 ---
 
@@ -24,8 +25,8 @@ A speaker segmentation model that classifies speech into four speaker types (**F
 
 # Clone (includes model weights via git-lfs):
 git lfs install
-git clone --recurse-submodules https://github.com/LAAC-LSCP/VTC.git
-cd VTC
+git clone --recurse-submodules https://github.com/LAAC-LSCP/DLplusplus.git
+cd DLplusplus
 
 # Install Python dependencies:
 uv sync
@@ -62,18 +63,23 @@ This recursively scans for all common audio formats (`wav`, `flac`, `mp3`, `ogg`
 `opus`, `m4a`, `aac`, `aiff`, `wma`) and writes `manifests/my_dataset.csv` with
 columns `path` (absolute), `uid` (filename stem), and `ext` (format).
 
-### Single-folder inference
+### Single-step inference
 
-Run the VTC model on a folder of audio files:
+Run an individual pipeline step on a folder of audio files:
 
 ```bash
+# Speaker diarization (VTC)
 uv run python -m src.pipeline.vtc my_data \
-    --manifest manifests/my_dataset.csv \
+    --manifest manifests/my_dataset.csv
+
+# Voice activity detection (VAD)
+uv run python -m src.pipeline.vad my_data \
+    --manifest manifests/my_dataset.csv
 ```
 
 ### Full pipeline on a SLURM cluster
 
-Process an entire dataset end-to-end (VAD → VTC → comparison metrics):
+Process an entire dataset end-to-end:
 
 ```bash
 # First run with a custom manifest:
@@ -86,27 +92,92 @@ bash slurm/pipeline.sh my_data \
 bash slurm/pipeline.sh my_data
 ```
 
-This submits three chained SLURM jobs with automatic dependency handling. See the [Pipeline](#3-pipeline) section for full documentation.
+This submits five SLURM jobs — four feature extraction steps in parallel, then a packaging step that depends on all four. See the [Pipeline](#3-pipeline) section for full documentation.
 
 ---
 
 ## 3. Pipeline
 
-The pipeline runs four steps, each as a SLURM job:
+The pipeline orchestrator (`slurm/pipeline.sh`) runs a preflight check, then submits five SLURM jobs:
 
-|  Step  | Module | Resource | Description |
-|--------|--------|----------|-------------|
-| **1. VAD** | `src.pipeline.vad` | CPU | TenVAD speech detection |
-| **2. VTC** | `src.pipeline.vtc` | GPU | VTC-2.0 inference (diarization) |
-| **3. SNR** | `src.pipeline.snr` | GPU | Brouhaha SNR/C50 extraction |
-| **4. Noise** | `src.pipeline.noise` | GPU | PANNs CNN14 noise classification |
-| **5. Package** | `src.pipeline.package` | CPU | Clipping + WebDataset + figures |
+```
+                ┌─── VAD  (CPU)  ───┐
+                ├─── VTC  (GPU)  ───┤
+Raw Audio ──►   ├─── SNR  (GPU)  ───┼──► Package (CPU)
+                └─── Noise (GPU) ───┘
+```
 
-**Resume support:** Both VAD and VTC save checkpoints. Interrupted jobs can be resubmitted and will skip already-completed files.
+Steps 1–4 run **in parallel** as independent jobs. Step 5 (Package) depends on all four completing successfully.
 
-### Packaging (Step 5)
+| Step | Module | Resource | Description |
+|------|--------|----------|-------------|
+| **1. VAD** | `src.pipeline.vad` | CPU | TenVAD speech activity detection |
+| **2. VTC** | `src.pipeline.vtc` | GPU | BabyHuBERT/segma speaker diarization (KCHI, OCH, MAL, FEM) |
+| **3. SNR** | `src.pipeline.snr` | GPU | Brouhaha per-frame SNR & C50 extraction |
+| **4. Noise** | `src.pipeline.noise` | GPU | PANNs CNN14 environmental noise classification |
+| **5. Package** | `src.pipeline.package` | CPU | Clip tiling + WebDataset shards + dashboards |
 
-The packaging step tiles full audio files into clips of roughly equal length, cutting only at silence gaps (never mid-speech). Cut-point selection uses a **6-tier fallback chain**:
+**Resume support:** VAD and VTC save checkpoints. Interrupted jobs can be resubmitted and will skip already-completed files.
+
+### Step 1 — VAD (Voice Activity Detection)
+
+Runs [TenVAD](https://github.com/Tencent/TenVAD) with CPU multiprocessing (default: all cores).
+
+**Output:**
+- `output/{dataset}/vad_raw/segments.parquet` — per-frame VAD segments
+- `output/{dataset}/vad_merged/segments.parquet` — merged overlapping segments
+- `output/{dataset}/vad_meta/metadata.parquet` — per-file summary metadata
+
+### Step 2 — VTC (Voice Type Classification)
+
+Runs the BabyHuBERT model via [segma](https://github.com/arxaqapi/segma) on GPU (SLURM array, default 3 shards).
+
+**Output:**
+- `output/{dataset}/vtc_raw/` — raw VTC segments (per-shard parquets)
+- `output/{dataset}/vtc_merged/` — merged/deduplicated segments across shards
+- `output/{dataset}/vtc_meta/` — per-file summary metadata
+
+Segment columns: `uid`, `onset`, `offset`, `duration`, `label` (FEM / MAL / KCHI / OCH).
+
+### Step 3 — SNR (Signal-to-Noise Ratio & Clarity)
+
+Runs [Brouhaha](https://github.com/marianne-m/brouhaha-vad) on GPU (SLURM array, default 2 shards). Produces **per-file time-series arrays** and **speech-masked summary statistics**.
+
+**Output:**
+- `output/{dataset}/snr/{uid}.npz` — per-file compressed arrays:
+  - `snr` (float16, shape `n_frames`) — per-frame SNR in dB
+  - `c50` (float16, shape `n_frames`) — per-frame C50 clarity in dB
+  - `vad` (float16, shape `n_frames`) — per-frame Brouhaha VAD probability
+  - `step_s` — frame step in seconds (~16 ms)
+  - `vad_threshold` — threshold used (0.5)
+- `output/{dataset}/snr_meta/shard_{id}.parquet` — per-file metadata:
+  - `uid`, `snr_status`, `duration`, `n_raw_frames`, `n_speech_frames`, `speech_fraction`
+  - `snr_mean`, `snr_std`, `snr_min`, `snr_max` — computed only on speech frames (VAD > 0.5)
+  - `c50_mean`, `c50_std`, `c50_min`, `c50_max` — computed only on speech frames
+
+Downstream steps (e.g. packaging) index into the per-frame arrays by `onset/offset` using `step_s` to compute exact segment-level statistics.
+
+### Step 4 — Noise (Environmental Sound Classification)
+
+Runs [PANNs CNN14](https://github.com/qiuqiangkong/panns_inference) on GPU (SLURM array, default 2 shards). Classifies audio into 13 coarse categories and 527 AudioSet classes.
+
+**Output:**
+- `output/{dataset}/noise/{uid}.npz` — per-file compressed arrays:
+  - `categories` (float16, shape `n_bins × 13`) — coarse category probabilities
+  - `category_names` — the 13 category labels
+  - `audioset_probs` (float16, shape `n_bins × 527`) — full AudioSet probabilities
+  - `audioset_names` — 527 AudioSet display labels
+  - `pool_step_s`, `inference_step_s` — time resolutions
+- `output/{dataset}/noise_meta/shard_{id}.parquet` — per-file metadata:
+  - `uid`, `noise_status`, `duration`, `n_inference_windows`, `n_pooled_bins`
+  - `dominant_category`, `dominant_prob`
+  - `prob_{category}` — mean probability for each of 13 categories
+
+**Categories:** alarm_signal, animal, crying, environment, human_activity, impact, laughter, machinery, music, nature, other, silence, singing, tv_radio, vehicle.
+
+### Step 5 — Package (Clip Tiling + WebDataset Shards)
+
+Tiles full audio files into clips of roughly equal length, cutting only at silence gaps (never mid-speech). Cut-point selection uses a **6-tier fallback chain**:
 
 | Tier | Strategy | Severity |
 |------|----------|----------|
@@ -119,10 +190,12 @@ The packaging step tiles full audio files into clips of roughly equal length, cu
 
 Within each tier, the midpoint closest to the ideal evenly-distributed position is chosen. The pipeline output includes a **tier breakdown** showing how many cuts used each strategy.
 
-Output:
+**Output:**
 - `output/{dataset}/shards/` — WebDataset `.tar` shards (WAV/FLAC + JSON metadata)
 - `output/{dataset}/shards/manifest.csv` — per-clip metadata
 - `output/{dataset}/shards/samples/` — random sample clips for manual validation
+- `output/{dataset}/stats/` — Parquet DataFrames at multiple granularities (clip, segment, turn, conversation, file)
+- `figures/{dataset}/dashboard/` — 6 PNG diagnostic dashboards (see `src/plotting/README.md`)
 
 ### Clip metadata
 
@@ -155,21 +228,31 @@ The `.json` metadata contains:
 
 **Segment detail** — `vad_segments` and `vtc_segments`: lists of `{onset, offset, duration}` objects with timestamps relative to the clip start. `vtc_segments` additionally carry a `label` field (FEM / MAL / KCHI / OCH).
 
+### Additional tools
+
+| Module | Purpose |
+|--------|---------|
+| `src.pipeline.compare` | VAD vs VTC comparison (IoU, precision, recall, diagnostics) |
+| `src.pipeline.normalize` | Standardize external manifests into `manifests/{dataset}.csv` |
+| `src.pipeline.preflight` | Estimate dataset size, GPU needs, and wall-clock time |
+| `src.pipeline.segment_snr` | Post-hoc per-VTC-segment SNR/C50 averaging |
+
 ---
 
 ## 4. Project Structure
 
 ```
-VTC/
+DLplusplus/
 ├── src/
 │   ├── utils.py             # Shared utilities (manifest I/O, paths, logging)
 │   ├── compat.py            # Compatibility shims (torchaudio patches)
 │   ├── pipeline/            # CLI entry points (one per pipeline step)
-│   │   ├── vad.py           #   Step 1: Voice activity detection
-│   │   ├── vtc.py           #   Step 2: VTC inference (diarization)
+│   │   ├── vad.py           #   Step 1: TenVAD voice activity detection
+│   │   ├── vtc.py           #   Step 2: BabyHuBERT speaker diarization
 │   │   ├── snr.py           #   Step 3: Brouhaha SNR/C50 extraction
 │   │   ├── noise.py         #   Step 4: PANNs CNN14 noise classification
 │   │   ├── package.py       #   Step 5: Audio clipping + WebDataset shards
+│   │   ├── segment_snr.py   #   Post-hoc per-segment SNR/C50 averaging
 │   │   ├── compare.py       #   VAD vs VTC comparison helpers
 │   │   ├── normalize.py     #   Manifest normalization
 │   │   └── preflight.py     #   Pre-pipeline dataset scan
@@ -189,15 +272,43 @@ VTC/
 │       ├── figures.py       #   Orchestrator (calls sub-modules)
 │       ├── snr_noise.py     #   SNR quality + noise environment
 │       ├── speech_turns.py  #   Conversational structure + turns
-│       └── overview.py      #   Dataset overview + correlation + text summary
+│       ├── overview.py      #   Dataset overview + correlation + text summary
 │       └── packaging.py     #   Per-clip/label summary grids
+├── dataloader/              # Dataloader++ package (see Section 5)
+│   ├── types.py             #   Shared type aliases and enums
+│   ├── processor/           #   Feature Processor ABCs (offline extraction)
+│   │   ├── base.py          #     FeatureProcessor ABC
+│   │   └── registry.py      #     Processor discovery & registration
+│   ├── loader/              #   Feature Loader ABCs (waveform + metadata I/O)
+│   │   ├── base.py          #     FeatureLoader ABC
+│   │   ├── waveform.py      #     WaveformLoader
+│   │   └── metadata.py      #     MetadataLoader (JSON/Parquet/NPZ)
+│   ├── manifest/            #   Manifest management
+│   │   ├── schema.py        #     MetadataManifest schema
+│   │   ├── joiner.py        #     ManifestJoiner (Big Join)
+│   │   └── store.py         #     MetadataStore (unified I/O)
+│   ├── transform/           #   Runtime data transforms
+│   │   ├── base.py          #     DataProcessor ABC + Compose
+│   │   ├── audio.py         #     Resample, segment, normalize
+│   │   └── label.py         #     Label encoding, mask generation
+│   ├── batch/               #   Batching and collation
+│   │   ├── base.py          #     Collator ABC
+│   │   ├── data_batch.py    #     DataBatch container
+│   │   └── speech.py        #     SpeechCollator implementation
+│   └── dataset/             #   PyTorch Dataset implementations
+│       ├── base.py          #     SpeechDataset ABC
+│       └── webdataset.py    #     WebDataset-backed loader
 ├── slurm/
 │   ├── pipeline.sh          # One-command pipeline orchestrator
 │   ├── vad.slurm            # SLURM: VAD (CPU, 48 workers)
-│   ├── vtc.slurm            # SLURM: VTC (GPU array, 4 shards)
-│   ├── snr.slurm            # SLURM: Brouhaha SNR (GPU)
-│   ├── noise.slurm          # SLURM: PANNs noise (GPU)
-│   ├── package_test.sh      # SLURM: End-to-end packaging test
+│   ├── vtc.slurm            # SLURM: VTC (GPU array, 3 shards)
+│   ├── snr.slurm            # SLURM: Brouhaha SNR (GPU array, 2 shards)
+│   ├── noise.slurm          # SLURM: PANNs noise (GPU array, 2 shards)
+│   ├── segment_snr.slurm    # SLURM: Per-segment SNR (GPU array)
+│   ├── vtc_clips.slurm      # SLURM: VTC on packaged clips
+│   ├── snr_diagnostic.slurm # SLURM: SNR masking diagnostics
+│   ├── package_test.sh      # Quick end-to-end packaging test
+│   ├── repackage_test.sh    # Re-package + clip alignment test
 │   └── test.slurm           # SLURM: pytest on compute node
 ├── tests/                   # pytest suite covering all core modules
 │   ├── conftest.py          #   Audio fixtures + skip markers
@@ -212,13 +323,15 @@ VTC/
 │   ├── test_vad_processing.py
 │   ├── test_reproducibility.py
 │   └── test_stitched_audio.py
+├── docs/
+│   └── DATALOADER_DESIGN.md # Dataloader++ specification
 ├── scripts/
 │   ├── download_brouhaha.py # Auto-download Brouhaha checkpoint
 │   └── make_manifest.py     # Generate manifest from audio directory
 ├── models/                  # Brouhaha checkpoint (gitignored, auto-downloaded)
 │   └── best/checkpoints/
 │       └── best.ckpt        #   ~47 MB, from ylacombe/brouhaha-best
-├── VTC-2.0/                 # Model weights & config
+├── VTC-2.0/                 # BabyHuBERT model weights & config
 │   └── model/
 │       ├── best.ckpt        #   Trained checkpoint (~1 GB, git-lfs)
 │       └── config.yml       #   segma training config
@@ -252,67 +365,49 @@ sbatch slurm/test.slurm
 
 ---
 
-## 5. Model Performance
+## 5. Dataloader
 
-### Speaker classes
+The `dataloader/` package implements the **Dataloader++** specification for Meta's speech training infrastructure. It bridges the offline feature processing pipeline (above) with online model training.
 
-| Class | Description |
-|-------|-------------|
-| **KCHI** | Key child speech |
-| **OCH** | Other child speech |
-| **MAL** | Adult male speech |
-| **FEM** | Adult female speech |
+See [`docs/DATALOADER_DESIGN.md`](docs/DATALOADER_DESIGN.md) for the full design document.
 
-The model is trained on child-centered long-form recordings collected using a portable recorder attached to a child's vest (typically 0–5 years old).
-
-### F1 scores on the held-out test set
-
-| Model | KCHI | OCH | MAL | FEM | Average |
-|-------|:----:|:---:|:---:|:---:|:-------:|
-| VTC 1.0 | 68.2 | 30.5 | 41.2 | 63.7 | 50.9 |
-| VTC 1.5 | 68.4 | 20.6 | 56.7 | 68.9 | 53.6 |
-| **VTC 2.0** | **71.8** | **51.4** | **60.3** | **74.8** | **64.6** |
-| Human 2 | 79.7 | 60.4 | 67.6 | 71.5 | 69.8 |
-
-VTC 2.0 surpasses human-level performance on the **FEM** class.
-
-### Runtime
-
-<table>
-<tr><th>GPU</th><th>CPU</th></tr>
-<tr><td>
-
-| Batch size | Hardware | Speedup |
-|:----------:|:---------|:-------:|
-| 256 | H100 | **1/905** |
-| 256 | A40 | 1/650 |
-| 256 | Quadro RTX 8000 | 1/531 |
-
-</td><td>
-
-| Batch size | Hardware | Speedup |
-|:----------:|:---------|:-------:|
-| 256 | AMD EPYC 9334 | **1/29** |
-| 256 | AMD EPYC 7453 | 1/22 |
-| 256 | Xeon Silver 4214R | 1/16 |
-
-</td></tr>
-</table>
-
-Speedup factor is relative to audio duration. For example, 1/905 means 1 hour of audio processes in ~4 seconds on an H100.
-
-### Confusion matrices
-
-<p float="left" align="middle">
-  <img src="figures/vtc2_heldout_full_cm_precision.png" width="400"/>
-  <img src="figures/vtc2_heldout_full_cm_recall.png" width="400"/>
-</p>
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| **Feature Processor** | `dataloader/processor/` | ABC wrapping offline extraction stages (VAD, VTC, SNR, Noise) |
+| **Feature Loader** | `dataloader/loader/` | Load waveforms + metadata from WebDataset shards or raw files |
+| **Manifest Joiner** | `dataloader/manifest/` | Join heterogeneous metadata manifests by `wav_id` (the "Big Join") |
+| **Data Processor** | `dataloader/transform/` | Composable runtime transforms (segment, resample, encode, mask) |
+| **Collator / DataBatch** | `dataloader/batch/` | Pad variable-length samples into typed `DataBatch` tensors |
+| **Dataset** | `dataloader/dataset/` | PyTorch `Dataset` implementations (WebDataset-backed) |
 
 ---
 
 ## 6. Citation
 
-The training code for BabyHuBERT can be found at [LAAC-LSCP/BabyHuBERT](https://github.com/LAAC-LSCP/BabyHuBERT).
+```bibtex
+@software{dlplusplus,
+    title  = {{DL++}: Feature Processing and Data Loading for Child-Centered Long-Form Audio},
+    author = {Dager, Daniel and Kunze, Tarek and Charlot, Théo and Cristia, Alejandrina and Dupoux, Emmanuel and Lavechin, Marvin},
+    year   = {2026},
+    url    = {https://github.com/LAAC-LSCP/DLplusplus},
+}
+```
+
+---
+
+## 7. Component Models
+
+DL++ integrates the following models as feature processing stages:
+
+### TenVAD — Voice Activity Detection
+
+[Tencent/TenVAD](https://github.com/Tencent/TenVAD) — lightweight speech activity detector used in Step 1 (CPU).
+
+### BabyHuBERT — Voice Type Classification (VTC 2.0)
+
+Speaker diarization into four types (KCHI, OCH, MAL, FEM), trained on child-centered long-form recordings. Used in Step 2 (GPU).
+
+Training code: [LAAC-LSCP/BabyHuBERT](https://github.com/LAAC-LSCP/BabyHuBERT)
 
 ```bibtex
 @misc{charlot2025babyhubertmultilingualselfsupervisedlearning,
@@ -326,15 +421,10 @@ The training code for BabyHuBERT can be found at [LAAC-LSCP/BabyHuBERT](https://
 }
 ```
 
----
+<details>
+<summary>Earlier VTC versions</summary>
 
-## 7. Acknowledgement
-
-The Voice Type Classifier has benefited from numerous contributions over time.
-
-### VTC 1.5 (Whisper-VTC)
-
-GitHub: [LAAC-LSCP/VTC-IS-25](https://github.com/LAAC-LSCP/VTC-IS-25)
+**VTC 1.5 (Whisper-VTC)** — GitHub: [LAAC-LSCP/VTC-IS-25](https://github.com/LAAC-LSCP/VTC-IS-25)
 
 ```bibtex
 @inproceedings{kunze25_interspeech,
@@ -347,9 +437,7 @@ GitHub: [LAAC-LSCP/VTC-IS-25](https://github.com/LAAC-LSCP/VTC-IS-25)
 }
 ```
 
-### VTC 1.0 (PyanNet-VTC)
-
-GitHub: [MarvinLvn/voice-type-classifier](https://github.com/MarvinLvn/voice-type-classifier)
+**VTC 1.0 (PyanNet-VTC)** — GitHub: [MarvinLvn/voice-type-classifier](https://github.com/MarvinLvn/voice-type-classifier)
 
 ```bibtex
 @inproceedings{lavechin20_interspeech,
@@ -361,6 +449,42 @@ GitHub: [MarvinLvn/voice-type-classifier](https://github.com/MarvinLvn/voice-typ
     doi       = {10.21437/Interspeech.2020-1690},
 }
 ```
+
+</details>
+
+### Brouhaha — SNR & C50 Estimation
+
+[marianne-m/brouhaha-vad](https://github.com/marianne-m/brouhaha-vad) — per-frame signal-to-noise ratio and clarity (C50) extraction. Used in Step 3 (GPU).
+
+```bibtex
+@inproceedings{lavechin2023brouhaha,
+    title     = {Brouhaha: Multi-task Training for Voice Activity Detection, Speech-to-Noise Ratio, and Speech Reverberation Estimation},
+    author    = {Marvin Lavechin and Marianne Métais and Hadrien Titeux and Alodie Boissonnet and Johan Music and Hervé Bredin and Emmanouil Benetos and Alejandrina Cristia},
+    year      = {2023},
+    booktitle = {2023 IEEE Automatic Speech Recognition and Understanding Workshop (ASRU)},
+    doi       = {10.1109/ASRU57964.2023.10389642},
+}
+```
+
+### PANNs CNN14 — Environmental Noise Classification
+
+[qiuqiangkong/panns_inference](https://github.com/qiuqiangkong/panns_inference) — AudioSet-based sound event detection (527 classes, grouped into 13 coarse categories). Used in Step 4 (GPU).
+
+```bibtex
+@inproceedings{kong2020panns,
+    title     = {PANNs: Large-Scale Pretrained Audio Neural Networks for Audio Pattern Recognition},
+    author    = {Qiuqiang Kong and Yin Cao and Turab Iqbal and Yuxuan Wang and Wenwu Wang and Mark D. Plumbley},
+    year      = {2020},
+    journal   = {IEEE/ACM Transactions on Audio, Speech, and Language Processing},
+    volume    = {28},
+    pages     = {2880--2894},
+    doi       = {10.1109/TASLP.2020.3030497},
+}
+```
+
+---
+
+## 8. Acknowledgements
 
 This work uses the [segma](https://github.com/arxaqapi/segma) library, inspired by [pyannote.audio](https://github.com/pyannote/pyannote-audio).
 
