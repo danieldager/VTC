@@ -1,10 +1,10 @@
-"""Noise adapter — exposes ``src/pipeline/noise`` outputs as a FeatureProcessor.
+"""ESC adapter — exposes ``src/pipeline/esc`` outputs as a FeatureProcessor.
 
 Output directory layout consumed by this adapter::
 
     {output_dir}/
-        noise_meta/shard_*.parquet  uid, noise_status, dominant_category, …
-        noise/{uid}.npz             categories, audioset_probs (float16 arrays)
+        esc_meta/shard_*.parquet  uid, esc_status, dominant_category, …
+        esc/{uid}.npz             categories, audioset_probs (float16 arrays)
 """
 
 from __future__ import annotations
@@ -19,10 +19,10 @@ from dataloader.processor.base import FeatureProcessor
 from dataloader.types import MetadataDict, WavID
 
 
-class NoiseAdapter(FeatureProcessor):
-    """Read-only adapter over existing Noise (PANNs) pipeline outputs.
+class ESCAdapter(FeatureProcessor):
+    """Read-only adapter over existing ESC (PANNs) pipeline outputs.
 
-    The Noise pipeline (``src/pipeline/noise.py``) runs via SLURM and
+    The ESC pipeline (``src/pipeline/esc.py``) runs via SLURM and
     produces sharded metadata parquets + per-file ``.npz`` arrays.
 
     Parameters
@@ -31,7 +31,7 @@ class NoiseAdapter(FeatureProcessor):
         Root output directory for the dataset (e.g. ``output/seedlings_1``).
     """
 
-    name: ClassVar[str] = "noise"
+    name: ClassVar[str] = "esc"
     version: ClassVar[str] = "1.0.0"
 
     def __init__(self, output_dir: Path | str) -> None:
@@ -42,7 +42,7 @@ class NoiseAdapter(FeatureProcessor):
 
     def _meta_df(self) -> pl.DataFrame:
         if self._meta_cache is None:
-            path = self._root / "noise_meta"
+            path = self._root / "esc_meta"
             pq_files = sorted(path.glob("shard_*.parquet"))
             if not pq_files:
                 raise FileNotFoundError(f"No shard parquets in {path}")
@@ -53,25 +53,25 @@ class NoiseAdapter(FeatureProcessor):
         return self._meta_cache
 
     def _npz_path(self, wav_id: WavID) -> Path:
-        return self._root / "noise" / f"{wav_id}.npz"
+        return self._root / "esc" / f"{wav_id}.npz"
 
     # ── FeatureProcessor interface ────────────────────────────────────────
 
     def process(self, wav_id: WavID, audio_path: Path) -> MetadataDict:
-        """Not supported — run ``sbatch slurm/noise.slurm`` instead."""
+        """Not supported — run ``sbatch slurm/esc.slurm`` instead."""
         raise NotImplementedError(
-            "NoiseAdapter is read-only. Run the Noise pipeline via SLURM: "
-            "sbatch slurm/noise.slurm"
+            "ESCAdapter is read-only. Run the Noise pipeline via SLURM: "
+            "sbatch slurm/esc.slurm"
         )
 
     def save(self, wav_id: WavID, metadata: MetadataDict, output_dir: Path) -> Path:
         """Not supported — the Noise pipeline writes its own outputs."""
         raise NotImplementedError(
-            "NoiseAdapter is read-only. The pipeline saves outputs directly."
+            "ESCAdapter is read-only. The pipeline saves outputs directly."
         )
 
     def load(self, wav_id: WavID, output_dir: Path | None = None) -> MetadataDict:
-        """Load noise metadata and per-frame arrays for a single file.
+        """Load ESC metadata and per-frame arrays for a single file.
 
         Returns
         -------
@@ -85,12 +85,12 @@ class NoiseAdapter(FeatureProcessor):
         meta_rows = meta_df.filter(pl.col("uid") == wav_id)
         if meta_rows.is_empty():
             raise FileNotFoundError(
-                f"No noise metadata for wav_id={wav_id!r}"
+                f"No ESC metadata for wav_id={wav_id!r}"
             )
 
         npz_path = self._npz_path(wav_id)
         if not npz_path.is_file():
-            raise FileNotFoundError(f"No noise arrays at {npz_path}")
+            raise FileNotFoundError(f"No ESC arrays at {npz_path}")
 
         with np.load(npz_path, allow_pickle=False) as npz:
             arrays = {
@@ -107,13 +107,13 @@ class NoiseAdapter(FeatureProcessor):
         }
 
     def exists(self, wav_id: WavID, output_dir: Path | None = None) -> bool:
-        """Check whether noise outputs exist for *wav_id*."""
+        """Check whether ESC outputs exist for *wav_id*."""
         try:
             meta_df = self._meta_df()
         except FileNotFoundError:
             return False
         has_meta = meta_df.filter(
-            (pl.col("uid") == wav_id) & (pl.col("noise_status") == "ok")
+            (pl.col("uid") == wav_id) & (pl.col("esc_status") == "ok")
         ).height > 0
         return has_meta and self._npz_path(wav_id).is_file()
 
@@ -126,7 +126,7 @@ class NoiseAdapter(FeatureProcessor):
         except FileNotFoundError:
             return []
         return (
-            df.filter(pl.col("noise_status") == "ok")
+            df.filter(pl.col("esc_status") == "ok")
             .get_column("uid")
             .unique()
             .sort()

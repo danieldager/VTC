@@ -132,13 +132,13 @@ def build_clip_stats(
                 len(turns) / (clip.duration / 60) if clip.duration > 0 else 0, 2
             ),
             # Noise classification (from PANNs)
-            "dominant_noise": clip.dominant_noise or "?",
+            "dominant_esc": clip.dominant_esc or "?",
         }
         # Add per-category mean probabilities
-        profile = clip.noise_profile
+        profile = clip.esc_profile
         if profile:
             for cat, prob in profile.items():
-                row[f"noise_{cat}"] = round(prob, 4)
+                row[f"esc_{cat}"] = round(prob, 4)
         rows.append(row)
     df = pl.DataFrame(rows)
 

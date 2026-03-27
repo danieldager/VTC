@@ -135,7 +135,7 @@ class Clip:
     vad_segments: list[Segment] = field(default_factory=list)
     vtc_segments: list[Segment] = field(default_factory=list)
     # Generic feature store — loaders attach arbitrary per-clip data here.
-    # Keys are feature names (e.g. "noise_array", "noise_categories").
+    # Keys are feature names (e.g. "esc_array", "esc_categories").
     features: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @property
@@ -219,42 +219,42 @@ class Clip:
     # --- Noise properties (read from features dict) ---
 
     @property
-    def noise_array(self) -> np.ndarray | None:
-        return self.features.get("noise_array")
+    def esc_array(self) -> np.ndarray | None:
+        return self.features.get("esc_array")
 
-    @noise_array.setter
-    def noise_array(self, value: np.ndarray | None) -> None:
-        self.features["noise_array"] = value
-
-    @property
-    def noise_categories(self) -> list[str]:
-        return self.features.get("noise_categories", [])
-
-    @noise_categories.setter
-    def noise_categories(self, value: list[str]) -> None:
-        self.features["noise_categories"] = value
+    @esc_array.setter
+    def esc_array(self, value: np.ndarray | None) -> None:
+        self.features["esc_array"] = value
 
     @property
-    def noise_step_s(self) -> float:
-        return self.features.get("noise_step_s", 1.0)
+    def esc_categories(self) -> list[str]:
+        return self.features.get("esc_categories", [])
 
-    @noise_step_s.setter
-    def noise_step_s(self, value: float) -> None:
-        self.features["noise_step_s"] = value
+    @esc_categories.setter
+    def esc_categories(self, value: list[str]) -> None:
+        self.features["esc_categories"] = value
 
     @property
-    def noise_profile(self) -> dict[str, float] | None:
-        """Mean probability per noise category across the clip."""
-        arr = self.noise_array
+    def esc_step_s(self) -> float:
+        return self.features.get("esc_step_s", 1.0)
+
+    @esc_step_s.setter
+    def esc_step_s(self, value: float) -> None:
+        self.features["esc_step_s"] = value
+
+    @property
+    def esc_profile(self) -> dict[str, float] | None:
+        """Mean probability per ESC category across the clip."""
+        arr = self.esc_array
         if arr is None or len(arr) == 0:
             return None
         means = arr.mean(axis=0).astype(np.float32)
-        return {cat: float(means[i]) for i, cat in enumerate(self.noise_categories)}
+        return {cat: float(means[i]) for i, cat in enumerate(self.esc_categories)}
 
     @property
-    def dominant_noise(self) -> str | None:
+    def dominant_esc(self) -> str | None:
         """Noise category with highest mean probability in this clip."""
-        profile = self.noise_profile
+        profile = self.esc_profile
         if not profile:
             return None
         return max(profile, key=lambda k: profile[k])
@@ -355,10 +355,10 @@ class Clip:
             # Agreement
             "vad_vtc_iou": round(self.vad_vtc_iou, 3),
             # Noise classification (from PANNs)
-            "dominant_noise": self.dominant_noise,
-            "noise_profile": (
-                {k: round(v, 4) for k, v in self.noise_profile.items()}
-                if self.noise_profile is not None
+            "dominant_esc": self.dominant_esc,
+            "esc_profile": (
+                {k: round(v, 4) for k, v in self.esc_profile.items()}
+                if self.esc_profile is not None
                 else None
             ),
             # Segment details (relative timestamps)
@@ -383,7 +383,7 @@ class Clip:
         # Merge extra features that loaders have attached.
         # Internal keys (numpy arrays, raw loader state) are skipped;
         # only JSON-serialisable scalars / dicts / lists are included.
-        _INTERNAL = {"noise_array", "noise_categories", "noise_step_s"}
+        _INTERNAL = {"esc_array", "esc_categories", "esc_step_s"}
         for key, val in self.features.items():
             if key in _INTERNAL or key in meta:
                 continue

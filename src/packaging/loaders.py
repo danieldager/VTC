@@ -6,7 +6,7 @@ Each loader knows how to:
 3. **Attach** per-clip slices of that data to a Clip's features dict.
 
 The ``FeatureLoader`` protocol defines the interface.  Concrete loaders
-(``VADLoader``, ``VTCLoader``, ``NoiseLoader``) wrap the I/O that was
+(``VADLoader``, ``VTCLoader``, ``ESCLoader``) wrap the I/O that was
 previously inline in ``package.py``.
 """
 
@@ -115,23 +115,23 @@ class VADLoader:
 # ---------------------------------------------------------------------------
 
 
-class NoiseLoader:
-    """Load PANNs noise classification arrays and slice per clip."""
+class ESCLoader:
+    """Load PANNs ESC (Environmental Sound Classification) arrays and slice per clip."""
 
-    name = "noise"
+    name = "esc"
 
     def is_available(self, output_dir: Path) -> bool:
-        noise_dir = output_dir / "noise"
-        return noise_dir.exists() and any(noise_dir.glob("*.npz"))
+        esc_dir = output_dir / "esc"
+        return esc_dir.exists() and any(esc_dir.glob("*.npz"))
 
     def load_file(
         self, output_dir: Path, uid: str
     ) -> tuple[np.ndarray | None, list[str], float]:
         """Return (categories_array, category_names, pool_step_s)."""
-        noise_path = output_dir / "noise" / f"{uid}.npz"
-        if not noise_path.exists():
+        esc_path = output_dir / "esc" / f"{uid}.npz"
+        if not esc_path.exists():
             return None, [], 1.0
-        data = np.load(noise_path, allow_pickle=True)
+        data = np.load(esc_path, allow_pickle=True)
         cats = data["categories"].astype(np.float32)
         cat_names = list(data["category_names"])
         pool_step_s = float(data["pool_step_s"])
@@ -142,16 +142,16 @@ class NoiseLoader:
         clip: Clip,
         file_data: tuple[np.ndarray | None, list[str], float],
     ) -> None:
-        file_noise, cat_names, pool_step_s = file_data
-        if file_noise is None:
+        file_esc, cat_names, pool_step_s = file_data
+        if file_esc is None:
             return
         start_idx = int(clip.abs_onset / pool_step_s)
         end_idx = int(np.ceil(clip.abs_offset / pool_step_s))
-        start_idx = max(0, min(start_idx, file_noise.shape[0]))
-        end_idx = max(start_idx, min(end_idx, file_noise.shape[0]))
-        clip.noise_array = file_noise[start_idx:end_idx].astype(np.float16)
-        clip.noise_categories = cat_names
-        clip.noise_step_s = pool_step_s
+        start_idx = max(0, min(start_idx, file_esc.shape[0]))
+        end_idx = max(start_idx, min(end_idx, file_esc.shape[0]))
+        clip.esc_array = file_esc[start_idx:end_idx].astype(np.float16)
+        clip.esc_categories = cat_names
+        clip.esc_step_s = pool_step_s
 
 
 # ---------------------------------------------------------------------------

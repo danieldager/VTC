@@ -9,7 +9,7 @@
    - [Stage 1: VAD (Voice Activity Detection)](#stage-1-vad--voice-activity-detection)
    - [Stage 2: VTC (Voice Type Classification)](#stage-2-vtc--voice-type-classification)
    - [Stage 3: SNR (Signal-to-Noise Ratio)](#stage-3-snr--signal-to-noise-ratio)
-   - [Stage 4: Noise Classification](#stage-4-noise-classification)
+   - [Stage 4: ESC Classification](#stage-4-esc-classification)
    - [Stage 5: Packaging (Clip Tiling + WebDataset Sharding)](#stage-5-packaging)
 3. [Metadata Schema Reference](#3-metadata-schema-reference)
 4. [Storage Format & Size Characteristics](#4-storage-format--size-characteristics)
@@ -193,7 +193,7 @@ output/{dataset}/
 
 ---
 
-### Stage 4: Noise Classification
+### Stage 4: ESC Classification
 
 | Property | Value |
 |----------|-------|
@@ -228,7 +228,7 @@ output/{dataset}/
 **What it produces:**
 
 Per-file metadata (scalar statistics):
-- `uid`, `noise_status`, `duration`
+- `uid`, `esc_status`, `duration`
 - `n_inference_windows`, `n_pooled_bins`
 - `dominant_category`, `dominant_prob`
 - `prob_{category}` — per-category mean probability (16 columns)
@@ -243,8 +243,8 @@ Per-file arrays (window-level, stored as compressed NPZ):
 **Output files:**
 ```
 output/{dataset}/
-├── noise_meta/shard_{id}.parquet      # Per-file noise scalar stats
-└── noise/{uid}.npz                    # Per-file window-level arrays (compressed)
+├── esc_meta/shard_{id}.parquet      # Per-file ESC scalar stats
+└── esc/{uid}.npz                    # Per-file window-level arrays (compressed)
 ```
 
 ---
@@ -297,7 +297,7 @@ Each clip in the WebDataset shard includes a JSON sidecar with:
   "vad_vtc_iou": 0.423,
   "snr_mean": 11.0,
   "snr_std": 13.2,
-  "dominant_noise": "other",
+  "dominant_esc": "other",
   "vad_segments": [{"onset": 0.0, "offset": 5.3, "duration": 5.3}, ...],
   "vtc_segments": [{"onset": 0.5, "offset": 3.2, "label": "FEM"}, ...]
 }
@@ -326,7 +326,7 @@ The clip manifest provides the "Big Join" — all feature outputs unified per cl
 | **VTC** | `vtc_speech_duration`, `vtc_speech_density`, `n_vtc_segments`, `mean_vtc_seg_duration`, `mean_vtc_gap`, `n_turns`, `n_labels`, `labels_present`, `has_adult`, `child_speech_duration`, `adult_speech_duration`, `child_fraction`, `dominant_label` |
 | **VAD** | `vad_speech_duration`, `vad_speech_density`, `n_vad_segments`, `vad_vtc_iou` |
 | **SNR** | `snr_mean`, `snr_std`, `snr_min`, `snr_max`, `snr_step_s`, `c50_mean`, `c50_std`, `c50_min`, `c50_max` |
-| **Noise** | `dominant_noise` |
+| **Noise** | `dominant_esc` |
 | **Per-label** | `dur_FEM`, `dur_MAL`, `dur_KCHI`, `dur_OCH`, `vad_cov_FEM`, `vad_cov_MAL`, `vad_cov_KCHI`, `vad_cov_OCH` |
 
 ---
@@ -340,7 +340,7 @@ The clip manifest provides the "Big Join" — all feature outputs unified per cl
 | **VAD** | 13 columns (speech ratio, segment counts, duration stats) | Optional: `(n_frames,)` raw probabilities | VAD segments with onset/offset |
 | **VTC** | 7 columns (speech duration, label counts, sigmoid stats) | Optional: per-label logit tensors | VTC segments with speaker labels |
 | **SNR** | 12 columns (SNR/C50 mean/std/min/max, frame counts) | `snr`, `c50`, `vad` arrays (float16) | Scalar SNR stats |
-| **Noise** | 20 columns (dominant category, per-category probabilities) | `categories` (n_bins×16), `audioset_probs` (n_bins×527) | Dominant noise category |
+| **ESC** | 20 columns (dominant category, per-category probabilities) | `categories` (n_bins×16), `audioset_probs` (n_bins×527) | Dominant ESC category |
 | **Package** | 40 columns in clip manifest | — | Full JSON sidecar per clip |
 
 ---
@@ -376,7 +376,7 @@ Based on the **seedlings_10** dataset (52 long-form recordings, ~80 hours total)
 | **Total output** | ~80 GB | — |
 
 **Key takeaway**: Metadata overhead is **<1%** of waveform data. The dominant
-storage cost is always the audio itself. Even the heaviest metadata (noise
+storage cost is always the audio itself. Even the heaviest metadata (ESC
 embeddings with 527 AudioSet probabilities per time bin) adds only ~0.3%.
 
 ### Per-File Array Sizes (Typical)
@@ -523,7 +523,7 @@ uv run python -m src.pipeline.normalize --dataset my_corpus --path-col audio_pat
 sbatch slurm/vad.slurm my_corpus                   # CPU multiprocessing
 sbatch --array=0-3 slurm/vtc.slurm my_corpus       # GPU, 4 SLURM tasks
 sbatch --array=0-1 slurm/snr.slurm my_corpus       # GPU, 2 tasks
-sbatch --array=0-1 slurm/noise.slurm my_corpus     # GPU, 2 tasks (parallel with SNR)
+sbatch --array=0-1 slurm/esc.slurm my_corpus     # GPU, 2 tasks (parallel with SNR)
 
 # 3. Package into WebDataset shards
 sbatch slurm/package.slurm my_corpus               # CPU, single process
@@ -544,7 +544,7 @@ dataset = WebDatasetSpeechDataset(
 ```
 
 The shard manifest (`manifest.csv`) can also be used for:
-- **Stratified sampling**: Filter clips by `speech_density`, `snr_mean`, `dominant_noise`, etc.
+- **Stratified sampling**: Filter clips by `speech_density`, `snr_mean`, `dominant_esc`, etc.
 - **Quality gating**: Exclude clips below an SNR threshold or with too little speech
 - **Curriculum learning**: Sort by difficulty metrics
 
@@ -628,7 +628,7 @@ rewriting core logic.
 
 **Q: What's the metadata overhead relative to waveform storage?**  
 A: <1%. On our 80-hour test dataset (52 files), total metadata is 482 MB vs 79 GB
-of FLAC audio. Even the most verbose metadata (noise: 527-class probabilities at
+of FLAC audio. Even the most verbose metadata (ESC: 527-class probabilities at
 1-second resolution) adds only 0.3%.
 
 **Q: How large are the WebDataset shards?**  
@@ -681,11 +681,11 @@ by retraining the VTC model.
 
 **Q: Can I filter clips by acoustic quality before training?**  
 A: Yes. The clip manifest includes `snr_mean`, `speech_density`, `n_turns`,
-`dominant_noise`, and per-label durations — all usable as filter predicates.
+`dominant_esc`, and per-label durations — all usable as filter predicates.
 
 **Q: Why store 527 AudioSet probabilities instead of just the dominant category?**  
 A: The full probability vector enables: (1) custom category groupings post-hoc,
-(2) multi-label noise characterization (music + speech + traffic simultaneously),
+(2) multi-label ESC (music + speech + traffic simultaneously),
 (3) fine-grained quality filtering (e.g., exclude clips where `music > 0.3`).
 
 **Q: What is the C50 metric from the SNR stage?**  
@@ -744,7 +744,7 @@ manifests/{dataset}.csv                # Input: normalized manifest with absolut
 output/{dataset}/vad_*/                # VAD outputs
 output/{dataset}/vtc_*/                # VTC outputs
 output/{dataset}/snr*/                 # SNR outputs
-output/{dataset}/noise*/               # Noise outputs
+output/{dataset}/esc*/               # ESC outputs
 output/{dataset}/shards/               # Final WebDataset shards
 output/{dataset}/shards/manifest.csv   # Clip-level metadata (Big Join result)
 ```

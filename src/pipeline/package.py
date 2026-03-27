@@ -190,7 +190,7 @@ def main() -> None:
         print("Rendering figures ...", flush=True)
         save_all_figures(
             dfs, tier_counts, fig_dir,
-            noise_stats_dir=ds.output / "noise_stats",
+            esc_stats_dir=ds.output / "esc_stats",
         )
         print("Done.")
         return
@@ -249,7 +249,7 @@ def main() -> None:
         t_dash = time.time()
         save_all_figures(
             dfs, packer.tier_counts, fig_dir,
-            noise_stats_dir=ds.output / "noise_stats",
+            esc_stats_dir=ds.output / "esc_stats",
         )
         print(f"  Dashboard rendered in {time.time() - t_dash:.1f}s")
 

@@ -2,7 +2,7 @@
 
 Tests for the `src/core/`, `src/pipeline/`, and `src/packaging/` modules.
 Covers pure interval arithmetic, VAD processing helpers, SNR extraction,
-noise classification, checkpoint I/O, metadata row construction, parallel VAD
+ESC, checkpoint I/O, metadata row construction, parallel VAD
 execution, clip tiling, end-to-end VAD integration on real speech, and
 reproducibility.
 
@@ -173,17 +173,17 @@ GPU/model tests require Brouhaha (pyannote) and skip otherwise.
 
 ---
 
-### `test_noise.py` — PANNs noise classification
+### `test_esc.py` — PANNs ESC
 
-Tests `src/pipeline/noise.py`. Pure-numpy tests run on the login node.
+Tests `src/pipeline/esc.py`. Pure-numpy tests run on the login node.
 GPU/model tests require PANNs CNN14 and skip otherwise.
 
 | Test class | What it verifies | PANNs? |
 |---|---|---|
-| `TestMapToCategories` | `map_to_categories` mapping from AudioSet labels to noise categories. | No |
-| `TestPoolNoise` | `pool_noise` aggregation over frame-level logits. | No |
+| `TestMapToCategories` | `map_to_categories` mapping from AudioSet labels to ESC categories. | No |
+| `TestPoolESC` | `pool_esc` aggregation over frame-level logits. | No |
 | `TestPoolToCategories` | `pool_to_categories` top-k category extraction. | No |
-| `TestClipNoiseIntegration` | End-to-end clip-level noise classification on synthetic data. | No |
+| `TestClipESCIntegration` | End-to-end clip-level ESC on synthetic data. | No |
 | `TestExtractPanns` | `extract_panns` output schema, real audio inference. | **Yes** |
 
 ---

@@ -22,7 +22,7 @@ def save_all_figures(
     dfs: dict[str, pl.DataFrame],
     tier_counts: dict[str, int],
     fig_dir: Path,
-    noise_stats_dir: Path | None = None,
+    esc_stats_dir: Path | None = None,
 ) -> None:
     """Render master dashboard figures from cached DataFrames.
 
@@ -36,10 +36,10 @@ def save_all_figures(
         Cut-tier breakdown from ``build_clips``.
     fig_dir : Path
         Root figure directory.  Pages are saved as PNG files inside it.
-    noise_stats_dir : Path | None
-        Optional path to ``noise_stats/`` directory produced by
-        ``src.analysis.noise_stats``.  When provided, enables richer
-        noise figures.
+    esc_stats_dir : Path | None
+        Optional path to ``esc_stats/`` directory produced by
+        ``src.analysis.esc_stats``.  When provided, enables richer
+        ESC figures.
     """
     fig_dir.mkdir(parents=True, exist_ok=True)
 
@@ -60,7 +60,7 @@ def save_all_figures(
     save_master_quality(
         clip_df, segment_df, turn_df, conv_df, trans_df,
         fig_dir / "master_quality.png",
-        noise_stats_dir=noise_stats_dir,
+        esc_stats_dir=esc_stats_dir,
     )
 
     print(f"\n  Figures: {fig_dir}/ (2 master pages)")

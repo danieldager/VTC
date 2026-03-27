@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Fine-grained noise statistics from PANNs CNN14 NPZ outputs.
+Fine-grained ESC statistics from PANNs CNN14 NPZ outputs.
 
 Computes per-class and per-category metrics across all audio files in a
 dataset by reading the pre-computed ``audioset_probs`` arrays (N_bins × 527)
@@ -23,17 +23,17 @@ redesigned map:
                        windows where the category max-probability > 0.05.
 
 For coarse categories the "probability" per window is the *maximum* over all
-member class probabilities (consistent with noise.py's ``map_to_categories``).
+member class probabilities (consistent with esc.py's ``map_to_categories``).
 
-Outputs saved to  output/{dataset}/noise_stats/ :
+Outputs saved to  output/{dataset}/esc_stats/ :
   audioset_stats.parquet     per AudioSet class  (527 rows × metrics)
   category_stats.parquet     original + redesigned side-by-side per category
   per_file_summary.parquet   per recording (dominant cats, top-10 classes …)
   summary.json               scalar dataset-level numbers
 
 Usage:
-    python -m src.analysis.noise_stats seedlings_10
-    python -m src.analysis.noise_stats seedlings_10 --active_threshold 0.1
+    python -m src.analysis.esc_stats seedlings_10
+    python -m src.analysis.esc_stats seedlings_10 --active_threshold 0.1
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
     stream=sys.stdout,
 )
-logger = logging.getLogger("noise_stats")
+logger = logging.getLogger("esc_stats")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Speech indices (excluded from all non-speech metrics)
@@ -171,15 +171,15 @@ def _category_probs(
 def main(dataset: str, active_threshold: float = 0.05) -> None:
     t0 = time.time()
     paths = get_dataset_paths(dataset)
-    noise_dir = paths.output / "noise"
+    esc_dir = paths.output / "esc"
 
-    if not noise_dir.exists():
-        logger.error(f"No noise directory: {noise_dir}")
+    if not esc_dir.exists():
+        logger.error(f"No ESC directory: {esc_dir}")
         sys.exit(1)
 
-    npz_files = sorted(noise_dir.glob("*.npz"))
+    npz_files = sorted(esc_dir.glob("*.npz"))
     if not npz_files:
-        logger.error(f"No NPZ files in {noise_dir}")
+        logger.error(f"No NPZ files in {esc_dir}")
         sys.exit(1)
 
     logger.info(f"Dataset      : {dataset}")
@@ -367,7 +367,7 @@ def main(dataset: str, active_threshold: float = 0.05) -> None:
     file_df = pl.DataFrame(per_file_rows)
 
     # ── Save outputs ──────────────────────────────────────────────────────
-    stats_dir = paths.output / "noise_stats"
+    stats_dir = paths.output / "esc_stats"
     stats_dir.mkdir(parents=True, exist_ok=True)
 
     as_df.write_parquet(stats_dir / "audioset_stats.parquet")
@@ -545,7 +545,7 @@ def main(dataset: str, active_threshold: float = 0.05) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Compute fine-grained noise statistics from PANNs NPZ outputs."
+        description="Compute fine-grained ESC statistics from PANNs NPZ outputs."
     )
     parser.add_argument("dataset", help="Dataset name (e.g. seedlings_10)")
     parser.add_argument(

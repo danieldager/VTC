@@ -89,19 +89,19 @@ Single heatmap of Pearson correlations across all numeric clip metrics.
 
 *Source: `overview.py → save_correlation_figure`*
 
-### Page 6 — `noise_environment.png` · Noise Environment (3×3)
+### Page 6 — `esc_environment.png` · ESC Environment (3×3)
 
-Only rendered when `noise_*` columns are present (i.e. PANNs was run).
+Only rendered when `esc_*` columns are present (i.e. PANNs was run).
 
-1. Dominant noise type per clip (pie chart)
+1. Dominant ESC type per clip (pie chart)
 2. Mean probability per category (bar chart)
 3. Probability distribution per category (boxplot)
 4. Noise category vs SNR (boxplot)
-5. Top 3 noise types per clip (stacked bar)
+5. Top 3 ESC types per clip (stacked bar)
 6. Noise probability heatmap (top clips)
 7. Category probability correlation heatmap
 8. Noise-type co-occurrence matrix
-9. Per-segment noise vs duration scatter
+9. Per-segment ESC vs duration scatter
 
 *Source: `snr_noise.py → save_noise_figures`*
 

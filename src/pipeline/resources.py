@@ -19,7 +19,7 @@ query_local_gpu() → GPUSpec | None
 recommend_vtc_batch_size(vram_gb) → int
     Map VRAM to a batch size for segma's ``apply_model_on_audio``.
 
-recommend_noise_batch_size(vram_gb) → int
+recommend_esc_batch_size(vram_gb) → int
     Map VRAM to a PANN window-batch size (number of 10 s windows per call).
 
 DatasetStats
@@ -196,7 +196,7 @@ def recommend_vtc_batch_size(vram_gb: int) -> int:
     return 32
 
 
-# PANNs noise classification — currently processes one window at a time,
+# PANNs ESC — currently processes one window at a time,
 # but we can batch multiple 10 s windows in a single forward pass.
 _NOISE_BATCH_TABLE: list[tuple[int, int]] = [
     (80, 64),
@@ -207,7 +207,7 @@ _NOISE_BATCH_TABLE: list[tuple[int, int]] = [
 ]
 
 
-def recommend_noise_batch_size(vram_gb: int) -> int:
+def recommend_esc_batch_size(vram_gb: int) -> int:
     """Return a recommended PANNs batch size for the given VRAM."""
     for min_vram, bs in _NOISE_BATCH_TABLE:
         if vram_gb >= min_vram:
@@ -281,7 +281,7 @@ class ResourcePlan:
     vtc_array_count: int
 
     snr_array_count: int
-    noise_array_count: int
+    esc_array_count: int
 
     notes: list[str] = field(default_factory=list)
 
@@ -314,7 +314,7 @@ def plan_resources(
     max_vtc_shards : int | None
         Upper bound for VTC array count (default: gpu.count).
     max_gpu_shards : int | None
-        Upper bound for SNR/noise array count (default: gpu.count).
+        Upper bound for SNR/ESC array count (default: gpu.count).
     """
     notes: list[str] = []
 
@@ -327,7 +327,7 @@ def plan_resources(
             vtc_batch_size=128,
             vtc_array_count=2,
             snr_array_count=2,
-            noise_array_count=2,
+            esc_array_count=2,
             notes=notes,
         )
 
@@ -357,16 +357,16 @@ def plan_resources(
             f"(dataset too small for {gpu_budget} GPUs)"
         )
 
-    # SNR and Noise are lighter — 2 shards is usually plenty, but
+    # SNR and ESC are lighter — 2 shards is usually plenty, but
     # scale up for very large datasets.
     secondary_cap = min(vtc_max_from_bytes, vtc_max_from_files)
     snr_array = min(max(1, gpu_budget // 2), secondary_cap)
-    noise_array = min(max(1, gpu_budget // 2), secondary_cap)
+    esc_array = min(max(1, gpu_budget // 2), secondary_cap)
 
     # Ensure we don't exceed available GPUs across all concurrent jobs.
-    # VTC + SNR + Noise all run in parallel, each requesting 1 GPU per
+    # VTC + SNR + ESC all run in parallel, each requesting 1 GPU per
     # array task.
-    total_requested = vtc_array + snr_array + noise_array
+    total_requested = vtc_array + snr_array + esc_array
     if total_requested > gpu.count:
         # Scale back proportionally, prioritising VTC
         remaining = gpu.count
@@ -374,13 +374,13 @@ def plan_resources(
         remaining -= vtc_array
         snr_array = min(snr_array, max(1, remaining // 2))
         remaining -= snr_array
-        noise_array = max(1, remaining)
+        esc_array = max(1, remaining)
         notes.append(
             f"Scaled back to fit {gpu.count} GPUs: "
-            f"VTC={vtc_array}, SNR={snr_array}, Noise={noise_array}"
+            f"VTC={vtc_array}, SNR={snr_array}, ESC={esc_array}"
         )
 
-    notes.append(f"Total GPU tasks: {vtc_array + snr_array + noise_array} "
+    notes.append(f"Total GPU tasks: {vtc_array + snr_array + esc_array} "
                  f"/ {gpu.count} available")
 
     return ResourcePlan(
@@ -390,6 +390,6 @@ def plan_resources(
         vtc_batch_size=vtc_bs,
         vtc_array_count=vtc_array,
         snr_array_count=snr_array,
-        noise_array_count=noise_array,
+        esc_array_count=esc_array,
         notes=notes,
     )

@@ -1,6 +1,6 @@
 # DL++ (Dataloader++)
 
-A feature processing and data loading framework for child-centered long-form audio recordings. Runs a SLURM pipeline that extracts speech activity, speaker types, signal quality, and environmental noise — then packages everything into WebDataset shards with rich per-clip metadata for model training.
+A feature processing and data loading framework for child-centered long-form audio recordings. Runs a SLURM pipeline that extracts speech activity, speaker types, signal quality, and environmental sound classification (ESC) — then packages everything into WebDataset shards with rich per-clip metadata for model training.
 
 ## Table of Contents
 
@@ -104,7 +104,7 @@ The pipeline orchestrator (`slurm/pipeline.sh`) runs a preflight check, then sub
                 ┌─── VAD  (CPU)  ───┐
                 ├─── VTC  (GPU)  ───┤
 Raw Audio ──►   ├─── SNR  (GPU)  ───┼──► Package (CPU)
-                └─── Noise (GPU) ───┘
+                └─── ESC  (GPU)  ───┘
 ```
 
 Steps 1–4 run **in parallel** as independent jobs. Step 5 (Package) depends on all four completing successfully.
@@ -114,7 +114,7 @@ Steps 1–4 run **in parallel** as independent jobs. Step 5 (Package) depends on
 | **1. VAD** | `src.pipeline.vad` | CPU | TenVAD speech activity detection |
 | **2. VTC** | `src.pipeline.vtc` | GPU | BabyHuBERT/segma speaker diarization (KCHI, OCH, MAL, FEM) |
 | **3. SNR** | `src.pipeline.snr` | GPU | Brouhaha per-frame SNR & C50 extraction |
-| **4. Noise** | `src.pipeline.noise` | GPU | PANNs CNN14 environmental noise classification |
+| **4. ESC** | `src.pipeline.esc` | GPU | PANNs CNN14 environmental sound classification |
 | **5. Package** | `src.pipeline.package` | CPU | Clip tiling + WebDataset shards + dashboards |
 
 **Resume support:** VAD and VTC save checkpoints. Interrupted jobs can be resubmitted and will skip already-completed files.
@@ -157,19 +157,19 @@ Runs [Brouhaha](https://github.com/marianne-m/brouhaha-vad) on GPU (SLURM array,
 
 Downstream steps (e.g. packaging) index into the per-frame arrays by `onset/offset` using `step_s` to compute exact segment-level statistics.
 
-### Step 4 — Noise (Environmental Sound Classification)
+### Step 4 — ESC (Environmental Sound Classification)
 
 Runs [PANNs CNN14](https://github.com/qiuqiangkong/panns_inference) on GPU (SLURM array, default 2 shards). Classifies audio into 13 coarse categories and 527 AudioSet classes.
 
 **Output:**
-- `output/{dataset}/noise/{uid}.npz` — per-file compressed arrays:
+- `output/{dataset}/esc/{uid}.npz` — per-file compressed arrays:
   - `categories` (float16, shape `n_bins × 13`) — coarse category probabilities
   - `category_names` — the 13 category labels
   - `audioset_probs` (float16, shape `n_bins × 527`) — full AudioSet probabilities
   - `audioset_names` — 527 AudioSet display labels
   - `pool_step_s`, `inference_step_s` — time resolutions
-- `output/{dataset}/noise_meta/shard_{id}.parquet` — per-file metadata:
-  - `uid`, `noise_status`, `duration`, `n_inference_windows`, `n_pooled_bins`
+- `output/{dataset}/esc_meta/shard_{id}.parquet` — per-file metadata:
+  - `uid`, `esc_status`, `duration`, `n_inference_windows`, `n_pooled_bins`
   - `dominant_category`, `dominant_prob`
   - `prob_{category}` — mean probability for each of 13 categories
 
@@ -199,14 +199,12 @@ Within each tier, the midpoint closest to the ideal evenly-distributed position 
 
 ### Clip metadata
 
-Each clip in a shard is stored as up to four files sharing the key `{uid}_{clip_idx:04d}`:
+Each clip in a shard is stored as two files sharing the key `{uid}_{clip_idx:04d}`:
 
 | File | Format | Contents |
 |------|--------|----------|
 | `{clip_id}.wav` / `.flac` | WAV / FLAC | Mono audio, 16 kHz |
 | `{clip_id}.json` | JSON (UTF-8) | All scalar + structured metadata (see below) |
-| `{clip_id}.snr.npy` | NumPy float16 | Time-series SNR values per `snr_step_s` window |
-| `{clip_id}.c50.npy` | NumPy float16 | Time-series C50 values per `snr_step_s` window |
 
 The `.json` metadata contains:
 
@@ -220,11 +218,9 @@ The `.json` metadata contains:
 
 **VAD–VTC agreement** — `vad_vtc_iou`: frame-level Intersection over Union between the two systems' masks.
 
-**SNR** — `snr_mean`, `snr_std`, `snr_min`, `snr_max` (dB); `snr_step_s` (window size); `snr` (full time-series list, also stored as `.snr.npy`).
+**SNR & C50** — Per-VTC-segment SNR and C50 averages are computed by the `segment_snr` post-hoc step and stored in `output/{dataset}/segment_snr/` parquets (columns: `uid`, `onset`, `offset`, `label`, `snr_mean`, `c50_mean`). During packaging, these are aggregated into per-clip summary statistics in the manifest CSV: `snr_mean`, `snr_std`, `snr_min`, `snr_max`, `c50_mean`, `c50_std`, `c50_min`, `c50_max` (dB). Higher C50 = less reverberation. The full per-frame time-series arrays remain available in `snr/{uid}.npz` for downstream analysis.
 
-**C50** — `c50_mean`, `c50_std`, `c50_min`, `c50_max` (dB); `c50` (full time-series, also stored as `.c50.npy`). Higher C50 = less reverberation.
-
-**Noise environment** — `dominant_noise` (category name), `noise_profile` (dict of mean probability per category).
+**ESC environment** — `dominant_esc` (category name), `esc_profile` (dict of mean probability per category).
 
 **Segment detail** — `vad_segments` and `vtc_segments`: lists of `{onset, offset, duration}` objects with timestamps relative to the clip start. `vtc_segments` additionally carry a `label` field (FEM / MAL / KCHI / OCH).
 
@@ -250,7 +246,7 @@ DLplusplus/
 │   │   ├── vad.py           #   Step 1: TenVAD voice activity detection
 │   │   ├── vtc.py           #   Step 2: BabyHuBERT speaker diarization
 │   │   ├── snr.py           #   Step 3: Brouhaha SNR/C50 extraction
-│   │   ├── noise.py         #   Step 4: PANNs CNN14 noise classification
+│   │   ├── esc.py           #   Step 4: PANNs CNN14 ESC
 │   │   ├── package.py       #   Step 5: Audio clipping + WebDataset shards
 │   │   ├── segment_snr.py   #   Post-hoc per-segment SNR/C50 averaging
 │   │   ├── compare.py       #   VAD vs VTC comparison helpers
@@ -285,7 +281,7 @@ DLplusplus/
 │   │   ├── vad.py           #     VADAdapter (reads vad_meta, vad_raw, vad_merged)
 │   │   ├── vtc.py           #     VTCAdapter (reads vtc_meta, vtc_raw, vtc_merged)
 │   │   ├── snr.py           #     SNRAdapter (reads snr_meta, snr/*.npz)
-│   │   └── noise.py         #     NoiseAdapter (reads noise_meta, noise/*.npz)
+│   │   └── esc.py           #     ESCAdapter (reads esc_meta, esc/*.npz)
 │   ├── loader/              #   Feature Loader ABCs (waveform + metadata I/O)
 │   │   ├── base.py          #     FeatureLoader ABC
 │   │   ├── waveform.py      #     WaveformLoader
@@ -310,7 +306,7 @@ DLplusplus/
 │   ├── vad.slurm            # SLURM: VAD (CPU, 48 workers)
 │   ├── vtc.slurm            # SLURM: VTC (GPU array, 3 shards)
 │   ├── snr.slurm            # SLURM: Brouhaha SNR (GPU array, 2 shards)
-│   ├── noise.slurm          # SLURM: PANNs noise (GPU array, 2 shards)
+│   ├── esc.slurm            # SLURM: PANNs ESC (GPU array, 2 shards)
 │   ├── segment_snr.slurm    # SLURM: Per-segment SNR (GPU array)
 │   ├── vtc_clips.slurm      # SLURM: VTC on packaged clips
 │   ├── snr_diagnostic.slurm # SLURM: SNR masking diagnostics
@@ -326,7 +322,7 @@ DLplusplus/
 │   ├── test_parallel.py
 │   ├── test_clips.py        #   Clip tiling + tier fallback chain
 │   ├── test_snr.py          #   Brouhaha SNR extraction
-│   ├── test_noise.py        #   PANNs noise classification
+│   ├── test_esc.py        #   PANNs ESC
 │   ├── test_vad_processing.py
 │   ├── test_reproducibility.py
 │   └── test_stitched_audio.py
@@ -380,7 +376,7 @@ See [`docs/DATALOADER_DESIGN.md`](docs/DATALOADER_DESIGN.md) for the full design
 
 | Component | Location | Purpose |
 |-----------|----------|---------|
-| **Feature Processor** | `dataloader/processor/` | ABC wrapping offline extraction stages (VAD, VTC, SNR, Noise) |
+| **Feature Processor** | `dataloader/processor/` | ABC wrapping offline extraction stages (VAD, VTC, SNR, ESC) |
 | **Feature Loader** | `dataloader/loader/` | Load waveforms + metadata from WebDataset shards or raw files |
 | **Manifest Joiner** | `dataloader/manifest/` | Join heterogeneous metadata manifests by `wav_id` (the "Big Join") |
 | **Data Processor** | `dataloader/transform/` | Composable runtime transforms (segment, resample, encode, mask) |
@@ -473,7 +469,7 @@ Training code: [LAAC-LSCP/BabyHuBERT](https://github.com/LAAC-LSCP/BabyHuBERT)
 }
 ```
 
-### PANNs CNN14 — Environmental Noise Classification
+### PANNs CNN14 — Environmental Sound Classification (ESC)
 
 [qiuqiangkong/panns_inference](https://github.com/qiuqiangkong/panns_inference) — AudioSet-based sound event detection (527 classes, grouped into 13 coarse categories). Used in Step 4 (GPU).
 

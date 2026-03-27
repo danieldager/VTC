@@ -9,8 +9,8 @@ Master 2  «Recording & Conversation Quality»
   Row 0  Turns:       Turn duration by role, speaker transitions, turn density
   Row 1  Conversations: conversations vs monologues, conversation duration,
                         turns per conversation
-  Row 2  Recording:   Per-segment SNR & C50 (overlaid), noise active rate bars,
-                       noise category bars (pw-hours)
+  Row 2  Recording:   Per-segment SNR & C50 (overlaid), ESC active rate bars,
+                       ESC category bars (pw-hours)
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from src.plotting.utils import lazy_pyplot, save_figure
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Noise colour map (shared with snr_noise.py)
+# ESC colour map (shared with snr_noise.py)
 # ═══════════════════════════════════════════════════════════════════════════
 
 _NOISE_COLORS: dict[str, str] = {
@@ -401,9 +401,9 @@ def save_master_overview(
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def _noise_horiz_bars(ax, categories: list[str], values: np.ndarray,
+def _esc_horiz_bars(ax, categories: list[str], values: np.ndarray,
                       title: str, xlabel: str, *, pct: bool = False) -> None:
-    """Horizontal bar chart for noise categories, coloured per category."""
+    """Horizontal bar chart for ESC categories, coloured per category."""
     order = np.argsort(values)
     sorted_labels = [categories[i] for i in order]
     sorted_values = values[order]
@@ -436,13 +436,13 @@ def save_master_quality(
     conversation_df: pl.DataFrame,
     transition_df: pl.DataFrame,
     output_path: Path,
-    noise_stats_dir: Path | None = None,
+    esc_stats_dir: Path | None = None,
 ) -> None:
     """Recording & conversation quality dashboard — 3×3 panels.
 
     Row 0  Turns:         Turn duration by role, speaker transitions, turn density
     Row 1  Conversations: convs vs monologues, conversation duration, turns/conv
-    Row 2  Recording:     Per-segment SNR/C50, noise active rate, noise pw-hours
+    Row 2  Recording:     Per-segment SNR/C50, ESC active rate, ESC pw-hours
     """
     plt = lazy_pyplot()
 
@@ -624,27 +624,27 @@ def save_master_quality(
     # [2,1] Noise categories — horizontal bars (active detection rate)
     ax = axes[2, 1]
     cat_stats_path = (
-        noise_stats_dir / "category_stats.parquet"
-        if noise_stats_dir is not None
+        esc_stats_dir / "category_stats.parquet"
+        if esc_stats_dir is not None
         else None
     )
-    _noise_cat_df = None
+    _esc_cat_df = None
     if cat_stats_path is not None and cat_stats_path.exists():
-        _noise_cat_df = (
+        _esc_cat_df = (
             pl.read_parquet(cat_stats_path)
             .filter(pl.col("map_version") == "new")
             .sort("pw_hours", descending=True)
         )
-        cats = _noise_cat_df["category"].to_list()
-        active = _noise_cat_df["active_rate"].to_numpy().astype(np.float64) * 100
-        _noise_horiz_bars(
+        cats = _esc_cat_df["category"].to_list()
+        active = _esc_cat_df["active_rate"].to_numpy().astype(np.float64) * 100
+        _esc_horiz_bars(
             ax, cats, active,
             "Noise Active Rate\n(% of 1-s windows with P > 0.05)", "% of windows",
             pct=True,
         )
     else:
         ax.text(
-            0.5, 0.5, "No noise data", ha="center", va="center",
+            0.5, 0.5, "No ESC data", ha="center", va="center",
             transform=ax.transAxes, fontsize=11, color="#868e96",
         )
         ax.set_title("Noise Active Rate", fontsize=10)
@@ -652,15 +652,15 @@ def save_master_quality(
 
     # [2,2] Noise categories — horizontal bars (pw-hours)
     ax = axes[2, 2]
-    if _noise_cat_df is not None:
-        cats = _noise_cat_df["category"].to_list()
-        hrs = _noise_cat_df["pw_hours"].to_numpy().astype(np.float64)
-        _noise_horiz_bars(
+    if _esc_cat_df is not None:
+        cats = _esc_cat_df["category"].to_list()
+        hrs = _esc_cat_df["pw_hours"].to_numpy().astype(np.float64)
+        _esc_horiz_bars(
             ax, cats, hrs, "Noise Categories\n(probability-weighted hours)", "Hours"
         )
     else:
         ax.text(
-            0.5, 0.5, "No noise data", ha="center", va="center",
+            0.5, 0.5, "No ESC data", ha="center", va="center",
             transform=ax.transAxes, fontsize=11, color="#868e96",
         )
         ax.set_title("Noise Categories", fontsize=10)

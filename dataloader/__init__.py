@@ -44,7 +44,7 @@ from dataloader.processor.registry import ProcessorRegistry
 from dataloader.adapters.vad import VADAdapter
 from dataloader.adapters.vtc import VTCAdapter
 from dataloader.adapters.snr import SNRAdapter
-from dataloader.adapters.noise import NoiseAdapter
+from dataloader.adapters.esc import ESCAdapter
 from dataloader.build import build_manifest
 from dataloader.config import DatasetConfig, FilterConfig, LoaderConfig, PipelineConfig
 from dataloader.create import create_dataloader
@@ -59,7 +59,7 @@ __all__ = [
     "FeatureProcessor",
     "ProcessorRegistry",
     # Adapters
-    "NoiseAdapter",
+    "ESCAdapter",
     "SNRAdapter",
     "VADAdapter",
     "VTCAdapter",

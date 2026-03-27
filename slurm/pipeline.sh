@@ -38,7 +38,7 @@ EXTRA_ARGS=""
 
 VTC_THRESHOLD=0.5          # fixed sigmoid threshold — no adaptive sweep
 
-mkdir -p logs/{vad,vtc,snr,noise,package}
+mkdir -p logs/{vad,vtc,snr,esc,package}
 
 # ---------- Preflight: auto-detect resources ------------------------------
 
@@ -55,7 +55,7 @@ PREFLIGHT_ENV=$(uv run python -m src.pipeline.preflight "$DATASET" \
 VTC_BATCH_SIZE=128
 VTC_ARRAY_COUNT=2
 SNR_ARRAY_COUNT=2
-NOISE_ARRAY_COUNT=2
+ESC_ARRAY_COUNT=2
 GPU_NAME="unknown"
 GPU_VRAM_GB=0
 
@@ -70,13 +70,13 @@ echo "║  Full pipeline: $DATASET"
 echo "║  sample=${SAMPLE:-all}"
 echo "║  GPU: ${GPU_NAME} (${GPU_VRAM_GB} GB VRAM)"
 echo "║  VTC: batch=${VTC_BATCH_SIZE}  shards=${VTC_ARRAY_COUNT}"
-echo "║  SNR: shards=${SNR_ARRAY_COUNT}  Noise: shards=${NOISE_ARRAY_COUNT}"
+echo "║  SNR: shards=${SNR_ARRAY_COUNT}  ESC: shards=${ESC_ARRAY_COUNT}"
 echo "║  VTC threshold=${VTC_THRESHOLD}  (fixed, no sweep)"
-echo "║  VAD + VTC + SNR + Noise run in parallel"
+echo "║  VAD + VTC + SNR + ESC run in parallel"
 echo "╚══════════════════════════════════════════════════════════╝"
 echo ""
 
-# ---------- Steps 1-4: VAD + VTC + SNR + Noise (all parallel) ------------
+# ---------- Steps 1-4: VAD + VTC + SNR + ESC (all parallel) ------------
 
 VAD_JOB=$(sbatch --parsable \
     slurm/vad.slurm "$DATASET" $EXTRA_ARGS)
@@ -102,18 +102,18 @@ SNR_JOB=$(sbatch --parsable \
 
 echo "  3. SNR (Brouhaha) : $SNR_JOB  (array ${SNR_ARRAY})"
 
-NOISE_ARRAY="0-$((NOISE_ARRAY_COUNT - 1))"
+ESC_ARRAY="0-$((ESC_ARRAY_COUNT - 1))"
 
-NOISE_JOB=$(sbatch --parsable \
-    --array="${NOISE_ARRAY}" \
-    slurm/noise.slurm "$DATASET" $EXTRA_ARGS)
+ESC_JOB=$(sbatch --parsable \
+    --array="${ESC_ARRAY}" \
+    slurm/esc.slurm "$DATASET" $EXTRA_ARGS)
 
-echo "  4. Noise (PANNs)  : $NOISE_JOB  (array ${NOISE_ARRAY})"
+echo "  4. ESC (PANNs)  : $ESC_JOB  (array ${ESC_ARRAY})"
 
 # ---------- Step 5: Package + Compare + Dashboard (after all) -------------
 
 PKG_JOB=$(sbatch --parsable \
-    --dependency=afterok:${VAD_JOB}:${VTC_JOB}:${SNR_JOB}:${NOISE_JOB} \
+    --dependency=afterok:${VAD_JOB}:${VTC_JOB}:${SNR_JOB}:${ESC_JOB} \
     --job-name=pkg_dash \
     --output=logs/package/pkg_%j.out \
     --error=logs/package/pkg_%j.err \
@@ -148,9 +148,9 @@ PKG_JOB=$(sbatch --parsable \
 echo "  5. Package+Dash   : $PKG_JOB"
 
 echo ""
-echo "Chain: [VAD($VAD_JOB) | VTC($VTC_JOB) | SNR($SNR_JOB) | Noise($NOISE_JOB)] → Package($PKG_JOB)"
+echo "Chain: [VAD($VAD_JOB) | VTC($VTC_JOB) | SNR($SNR_JOB) | ESC($ESC_JOB)] → Package($PKG_JOB)"
 echo ""
 echo "Monitor : squeue -u \$USER"
-echo "Cancel  : scancel $VAD_JOB $VTC_JOB $SNR_JOB $NOISE_JOB $PKG_JOB"
+echo "Cancel  : scancel $VAD_JOB $VTC_JOB $SNR_JOB $ESC_JOB $PKG_JOB"
 echo "Pkg log : logs/package/pkg_\${PKG_JOB}.out"
 echo ""

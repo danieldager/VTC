@@ -88,9 +88,9 @@ class TestPrepareIdempotency:
         assert _stage_done(SEEDLINGS_DIR, "snr"), \
             "SNR outputs not found — pipeline may not have run"
 
-    def test_stage_detection_noise(self) -> None:
+    def test_stage_detection_esc(self) -> None:
         from dataloader.prepare import _stage_done
-        assert _stage_done(SEEDLINGS_DIR, "noise"), \
+        assert _stage_done(SEEDLINGS_DIR, "esc"), \
             "Noise outputs not found — pipeline may not have run"
 
     def test_stage_detection_package(self) -> None:

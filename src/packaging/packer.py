@@ -27,7 +27,7 @@ import polars as pl
 from src.packaging.clips import CUT_TIERS, Clip, Segment, build_clips
 from src.packaging.loaders import (
     FeatureLoader,
-    NoiseLoader,
+    ESCLoader,
     VADLoader,
     VTCLoader,
     get_file_duration,
@@ -83,7 +83,7 @@ class Packer:
         candidates: list[FeatureLoader] = [
             VTCLoader(),
             VADLoader(),
-            NoiseLoader(),
+            ESCLoader(),
             *(extra_loaders or []),
         ]
         for loader in candidates:
@@ -107,8 +107,8 @@ class Packer:
         return any(l.name == "vad" for l in self._loaders)
 
     @property
-    def has_noise(self) -> bool:
-        return any(l.name == "noise" for l in self._loaders)
+    def has_esc(self) -> bool:
+        return any(l.name == "esc" for l in self._loaders)
 
     @property
     def loader_names(self) -> list[str]:
@@ -239,7 +239,7 @@ class Packer:
             meta.pop("vtc_segments", None)
             meta.pop("snr", None)
             meta.pop("c50", None)
-            meta.pop("noise_profile", None)
+            meta.pop("esc_profile", None)
             # Flatten nested types for CSV compatibility
             meta["labels_present"] = ";".join(meta.get("labels_present", []))
             ld = meta.pop("label_durations", {})

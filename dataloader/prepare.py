@@ -70,14 +70,14 @@ def _stage_done(output_dir: Path, stage: str) -> bool:
         )
     if stage == "snr":
         return bool(list((output_dir / "snr_meta").glob("shard_*.parquet")))
-    if stage == "noise":
-        return bool(list((output_dir / "noise_meta").glob("shard_*.parquet")))
+    if stage == "esc":
+        return bool(list((output_dir / "esc_meta").glob("shard_*.parquet")))
     if stage == "package":
         return _shards_exist(output_dir)
     raise ValueError(f"Unknown stage: {stage!r}")
 
 
-_ALL_STAGES = ["vad", "vtc", "snr", "noise", "package"]
+_ALL_STAGES = ["vad", "vtc", "snr", "esc", "package"]
 
 
 # ── SLURM helpers ────────────────────────────────────────────────────────────
@@ -145,7 +145,7 @@ def prepare(
     """Submit SLURM pipeline jobs and optionally wait for completion.
 
     Reads a :class:`~dataloader.config.DatasetConfig` to determine the
-    dataset and extraction parameters, then submits VAD + VTC + SNR + Noise
+    dataset and extraction parameters, then submits VAD + VTC + SNR + ESC
     jobs in parallel, followed by a Package job that depends on all four.
 
     Parameters
@@ -199,7 +199,7 @@ def prepare(
     vtc_batch_size = 128
     vtc_array_count = 2
     snr_array_count = 2
-    noise_array_count = 2
+    esc_array_count = 2
 
     try:
         preflight_result = subprocess.run(
@@ -214,8 +214,8 @@ def prepare(
                 vtc_array_count = int(line.split("=", 1)[1])
             elif line.startswith("SNR_ARRAY_COUNT="):
                 snr_array_count = int(line.split("=", 1)[1])
-            elif line.startswith("NOISE_ARRAY_COUNT="):
-                noise_array_count = int(line.split("=", 1)[1])
+            elif line.startswith("ESC_ARRAY_COUNT="):
+                esc_array_count = int(line.split("=", 1)[1])
     except Exception as exc:
         log.warning("Preflight failed (%s) — using defaults", exc)
 
@@ -224,14 +224,14 @@ def prepare(
     (logs_dir / "vad").mkdir(parents=True, exist_ok=True)
     (logs_dir / "vtc").mkdir(parents=True, exist_ok=True)
     (logs_dir / "snr").mkdir(parents=True, exist_ok=True)
-    (logs_dir / "noise").mkdir(parents=True, exist_ok=True)
+    (logs_dir / "esc").mkdir(parents=True, exist_ok=True)
     (logs_dir / "package").mkdir(parents=True, exist_ok=True)
 
     # ── Stages: figure out what needs running ─────────────────────────────
     run_vad   = not _stage_done(output_dir, "vad")
     run_vtc   = not _stage_done(output_dir, "vtc")
     run_snr   = not _stage_done(output_dir, "snr")
-    run_noise = not _stage_done(output_dir, "noise")
+    run_esc = not _stage_done(output_dir, "esc")
 
     print(f"\n[prepare] Dataset : {dataset}")
     print(f"[prepare] Output  : {output_dir}")
@@ -275,15 +275,15 @@ def prepare(
     else:
         print(f"[prepare]   SNR              : already done, skipping")
 
-    if run_noise:
-        noise_jid = _sbatch([
-            "--array", f"0-{noise_array_count - 1}",
-            str(slurm_dir / "noise.slurm"), dataset,
+    if run_esc:
+        esc_jid = _sbatch([
+            "--array", f"0-{esc_array_count - 1}",
+            str(slurm_dir / "esc.slurm"), dataset,
         ] + extra_args)
-        dep_job_ids.append(noise_jid)
-        print(f"[prepare]   Noise (×{noise_array_count} shards): job {noise_jid}")
+        dep_job_ids.append(esc_jid)
+        print(f"[prepare]   ESC   (×{esc_array_count} shards): job {esc_jid}")
     else:
-        print(f"[prepare]   Noise            : already done, skipping")
+        print(f"[prepare]   ESC              : already done, skipping")
 
     # ── Package job (depends on all feature jobs, or immediate if all done) ─
     pkg_cmd = (

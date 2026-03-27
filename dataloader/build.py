@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from dataloader.adapters.noise import NoiseAdapter
+from dataloader.adapters.esc import ESCAdapter
 from dataloader.adapters.snr import SNRAdapter
 from dataloader.adapters.vad import VADAdapter
 from dataloader.adapters.vtc import VTCAdapter
@@ -63,7 +63,7 @@ def build_manifest(
         (keep all, fill gaps with null).
     stages:
         Which pipeline stages to include. Defaults to all available among
-        ``["vad", "vtc", "snr", "noise"]``. Useful when not all stages
+        ``["vad", "vtc", "snr", "esc"]``. Useful when not all stages
         have been run yet.
 
     Returns
@@ -93,7 +93,7 @@ def build_manifest(
         "vad": VADAdapter,
         "vtc": VTCAdapter,
         "snr": SNRAdapter,
-        "noise": NoiseAdapter,
+        "esc": ESCAdapter,
     }
     requested = stages or list(_ALL_ADAPTERS.keys())
 

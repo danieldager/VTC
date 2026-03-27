@@ -60,9 +60,9 @@ class PipelineConfig:
         Path to the segma model checkpoint.
     snr_model_path:
         Path to the Brouhaha model checkpoint.
-    noise_pool_window:
+    esc_pool_window:
         PANNs temporal pooling window in seconds.
-    noise_inference_window:
+    esc_inference_window:
         PANNs chunk length in seconds.
     max_clip_s:
         Maximum clip duration for packaging (seconds).
@@ -85,9 +85,9 @@ class PipelineConfig:
     vtc_checkpoint: str = ""
     # SNR (Brouhaha)
     snr_model_path: str = ""
-    # Noise (PANNs)
-    noise_pool_window: float = 1.0
-    noise_inference_window: float = 10.0
+    # ESC (PANNs)
+    esc_pool_window: float = 1.0
+    esc_inference_window: float = 10.0
     # Packaging
     max_clip_s: float = 600.0
     split_search_s: float = 120.0
@@ -162,10 +162,10 @@ class FilterConfig:
         Minimum number of VTC segments.
     required_labels:
         VTC ``vtc_label_counts`` must contain at least one of these labels.
-    excluded_noise_categories:
+    excluded_esc_categories:
         Exclude files where ``dominant_category`` is in this list.
-    max_dominant_noise_prob:
-        Exclude files where the dominant noise probability exceeds this.
+    max_dominant_esc_prob:
+        Exclude files where the dominant ESC probability exceeds this.
     """
 
     # Duration
@@ -182,9 +182,9 @@ class FilterConfig:
     # Speaker content (VTC)
     min_vtc_segments: int | None = None
     required_labels: list[str] | None = field(default=None)
-    # Noise environment
-    excluded_noise_categories: list[str] | None = field(default=None)
-    max_dominant_noise_prob: float | None = None
+    # ESC environment
+    excluded_esc_categories: list[str] | None = field(default=None)
+    max_dominant_esc_prob: float | None = None
 
     def apply(self, manifest: MetadataManifest) -> MetadataManifest:
         """Return a new manifest containing only rows that pass all filters.
@@ -241,15 +241,15 @@ class FilterConfig:
                 )
             exprs.append(label_expr)
 
-        # Excluded noise categories
-        if self.excluded_noise_categories and "dominant_category" in cols:
+        # Excluded ESC categories
+        if self.excluded_esc_categories and "dominant_category" in cols:
             exprs.append(
-                ~pl.col("dominant_category").is_in(self.excluded_noise_categories)
+                ~pl.col("dominant_category").is_in(self.excluded_esc_categories)
             )
 
-        # Dominant noise probability cap
-        if self.max_dominant_noise_prob is not None and "dominant_prob" in cols:
-            exprs.append(pl.col("dominant_prob") <= self.max_dominant_noise_prob)
+        # Dominant ESC probability cap
+        if self.max_dominant_esc_prob is not None and "dominant_prob" in cols:
+            exprs.append(pl.col("dominant_prob") <= self.max_dominant_esc_prob)
 
         # Combine all filters (AND)
         if not exprs:

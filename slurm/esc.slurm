@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=noise_panns
-#SBATCH --output=logs/noise/noise_%A_%a.out
-#SBATCH --error=logs/noise/noise_%A_%a.err
+#SBATCH --job-name=esc_panns
+#SBATCH --output=logs/esc/esc_%A_%a.out
+#SBATCH --error=logs/esc/esc_%A_%a.err
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=24:00:00
@@ -10,16 +10,16 @@
 #SBATCH --array=0-1
 
 DATASET="$1"
-shift 1  # remaining args passed through to noise.py
+shift 1  # remaining args passed through to esc.py
 
 if [ -z "$DATASET" ]; then
-    echo "Usage: sbatch noise.slurm <DATASET> [ADDITIONAL_ARGS...]"
-    echo "Example: sbatch noise.slurm seedlings_10"
+    echo "Usage: sbatch esc.slurm <DATASET> [ADDITIONAL_ARGS...]"
+    echo "Example: sbatch esc.slurm seedlings_10"
     exit 1
 fi
 
 echo ""
-echo "PANNs Noise Classification"
+echo "PANNs ESC (Environmental Sound Classification)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "Job: ${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}  Node: $(hostname)"
 echo "Shard: ${SLURM_ARRAY_TASK_ID}/$((SLURM_ARRAY_TASK_COUNT-1))"
@@ -35,7 +35,7 @@ module load ffmpeg
 echo ""
 
 PYTHONUNBUFFERED=1 \
-uv run src/pipeline/noise.py "$DATASET" \
+uv run src/pipeline/esc.py "$DATASET" \
     --array_id "$SLURM_ARRAY_TASK_ID" \
     --array_count "$SLURM_ARRAY_TASK_COUNT" \
     "$@"

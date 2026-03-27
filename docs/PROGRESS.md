@@ -250,7 +250,7 @@ Priority order:
 | `dataloader/adapters/vad.py` | 2 | ✅ VADAdapter — reads vad_meta, vad_raw, vad_merged |
 | `dataloader/adapters/vtc.py` | 2 | ✅ VTCAdapter — reads vtc_meta, vtc_raw, vtc_merged |
 | `dataloader/adapters/snr.py` | 2 | ✅ SNRAdapter — reads snr_meta, snr/*.npz |
-| `dataloader/adapters/noise.py` | 2 | ✅ NoiseAdapter — reads noise_meta, noise/*.npz |
+| `dataloader/adapters/esc.py` | 2 | ✅ ESCAdapter — reads esc_meta, esc/*.npz |
 | `dataloader/config.py` | 2 | ✅ PipelineConfig (versioned) + FilterConfig (load-time) |
 | `dataloader/build.py` | 2 | ✅ build_manifest() — Big Join + filters |
 
@@ -273,7 +273,7 @@ Priority order:
 | `src/pipeline/segment_snr.py` | Uses shared brouhaha/resume helpers | ✅ |
 | `src/pipeline/vad.py` | set_seeds from utils | ✅ |
 | `src/pipeline/vtc.py` | set_seeds from utils | ✅ |
-| `src/pipeline/noise.py` | set_seeds + resume from utils | ✅ |
+| `src/pipeline/esc.py` | set_seeds + resume from utils | ✅ |
 
 ### Archived
 

@@ -220,7 +220,7 @@ def main() -> None:
         print(f"VTC_BATCH_SIZE={plan.vtc_batch_size}")
         print(f"VTC_ARRAY_COUNT={plan.vtc_array_count}")
         print(f"SNR_ARRAY_COUNT={plan.snr_array_count}")
-        print(f"NOISE_ARRAY_COUNT={plan.noise_array_count}")
+        print(f"ESC_ARRAY_COUNT={plan.esc_array_count}")
         print(f"GPU_NAME={plan.gpu_name}")
         print(f"GPU_VRAM_GB={plan.gpu_vram_gb}")
         print(f"DATASET_FILES={dstats.n_found}")
@@ -279,7 +279,7 @@ def main() -> None:
     print(f"    VTC batch  : {plan.vtc_batch_size}")
     print(f"    VTC shards : {plan.vtc_array_count}")
     print(f"    SNR shards : {plan.snr_array_count}")
-    print(f"    Noise shards: {plan.noise_array_count}")
+    print(f"    ESC shards: {plan.esc_array_count}")
     for note in plan.notes:
         print(f"    ▸ {note}")
 

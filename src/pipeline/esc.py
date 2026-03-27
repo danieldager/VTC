@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PANNs noise-classification pipeline: classify non-speech audio into AudioSet
+PANNs ESC (Environmental Sound Classification) pipeline: classify non-speech audio into AudioSet
 categories using a pretrained CNN14 model.
 
 For each audio file in the manifest:
@@ -16,15 +16,15 @@ can apply any mask they wish.
 
 Paths derived from the dataset name:
     manifests/{dataset}.<ext>              input manifest
-    output/{dataset}/noise/                pooled class arrays (.npz)
-    output/{dataset}/noise_meta/           per-file metadata  (.parquet)
+    output/{dataset}/esc/                pooled class arrays (.npz)
+    output/{dataset}/esc_meta/           per-file metadata  (.parquet)
 
 Usage:
-    python -m src.pipeline.noise chunks30
-    python -m src.pipeline.noise chunks30 --pool_window 1.0
+    python -m src.pipeline.esc chunks30
+    python -m src.pipeline.esc chunks30 --pool_window 1.0
 
 SLURM:
-    sbatch slurm/noise.slurm chunks30
+    sbatch slurm/esc.slurm chunks30
 """
 
 import argparse
@@ -57,7 +57,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
     stream=sys.stdout,
 )
-logger = logging.getLogger("noise")
+logger = logging.getLogger("esc")
 
 # ---------------------------------------------------------------------------
 # AudioSet category mapping
@@ -65,7 +65,7 @@ logger = logging.getLogger("noise")
 # We group 527 AudioSet classes into coarser categories relevant for
 # daylong recordings.  The mapping is index-based (0..526).
 
-# Speech-related class indices to EXCLUDE from noise classification:
+# Speech-related class indices to EXCLUDE from ESC output:
 _SPEECH_INDICES: set[int] = set(range(0, 16))  # classes 0-15 are speech/vocal
 
 # Coarse groupings — each is a set of AudioSet *indices* (0-based, matching the
@@ -220,7 +220,7 @@ def extract_panns(
     return np.concatenate(all_probs, axis=0).astype(np.float32), window_s
 
 
-def pool_noise(
+def pool_esc(
     raw_probs: np.ndarray,
     step_s: float,
     pool_window_s: float = 1.0,
@@ -327,11 +327,11 @@ def main(
     # ------------------------------------------------------------------
     # Resume: skip files already processed
     # ------------------------------------------------------------------
-    noise_dir = paths.output / "noise"
-    noise_dir.mkdir(parents=True, exist_ok=True)
+    esc_dir = paths.output / "esc"
+    esc_dir.mkdir(parents=True, exist_ok=True)
 
     completed_uids: set[str] = set()
-    meta_dir = paths.output / "noise_meta"
+    meta_dir = paths.output / "esc_meta"
     meta_dir.mkdir(parents=True, exist_ok=True)
     meta_path = meta_dir / f"shard_{shard_id}.parquet"
     prev_meta_df: pl.DataFrame | None = None
@@ -363,10 +363,10 @@ def main(
 
     # Auto-detect batch size from GPU VRAM when batch_size <= 0
     if batch_size <= 0:
-        from src.pipeline.resources import query_local_gpu, recommend_noise_batch_size
+        from src.pipeline.resources import query_local_gpu, recommend_esc_batch_size
         local_gpu = query_local_gpu()
         if local_gpu is not None:
-            batch_size = recommend_noise_batch_size(local_gpu.vram_gb)
+            batch_size = recommend_esc_batch_size(local_gpu.vram_gb)
             logger.info(f"Auto batch_size={batch_size} for {local_gpu.name} ({local_gpu.vram_gb} GB)")
         else:
             batch_size = 1
@@ -411,11 +411,11 @@ def main(
             )
 
             # Full 527-class pooled probabilities for fine-grained analysis
-            pooled_full, _ = pool_noise(raw_probs, step_s, pool_window)
+            pooled_full, _ = pool_esc(raw_probs, step_s, pool_window)
 
             # Save per-file: coarse categories + full 527 classes
             np.savez_compressed(
-                noise_dir / f"{uid}.npz",
+                esc_dir / f"{uid}.npz",
                 categories=pooled_cats,             # (n_bins, 13) float16
                 category_names=np.array(cats),      # (13,) string
                 audioset_probs=pooled_full,          # (n_bins, 527) float16
@@ -437,7 +437,7 @@ def main(
 
             meta_row = {
                 "uid": uid,
-                "noise_status": "ok",
+                "esc_status": "ok",
                 "duration": round(file_dur, 3),
                 "n_inference_windows": raw_probs.shape[0],
                 "n_pooled_bins": pooled_cats.shape[0],
@@ -458,7 +458,7 @@ def main(
             logger.warning(f"{uid}: {e}")
             meta_row = {
                 "uid": uid,
-                "noise_status": "error",
+                "esc_status": "error",
                 "duration": 0.0,
                 "n_inference_windows": 0,
                 "n_pooled_bins": 0,
@@ -486,7 +486,7 @@ def main(
         pct = 100.0 * bytes_done / total_bytes
         if i % log_every == 0 or i == total:
             print(
-                f"  Noise {i:>4}/{total}"
+                f"  ESC   {i:>4}/{total}"
                 f"  {bytes_done / 1e9:.1f}/{total_bytes / 1e9:.1f} GB"
                 f" ({pct:.0f}%)  ETA {eta}",
                 flush=True,
@@ -535,7 +535,7 @@ def main(
     logger.info(f"Shard {shard_id} complete")
     logger.info(f"  Files     : {processed}/{total}  ({n_errors} errors)")
     if not meta_df.is_empty():
-        ok = meta_df.filter(pl.col("noise_status") == "ok")
+        ok = meta_df.filter(pl.col("esc_status") == "ok")
         if not ok.is_empty():
             logger.info(f"  Dominant  : {ok['dominant_category'].value_counts()}")
             logger.info(
@@ -554,7 +554,7 @@ def main(
         if os.path.exists(uid_to_path[uid])
     )
     log_benchmark(
-        step="noise",
+        step="esc",
         dataset=dataset,
         n_files=total,
         wall_seconds=wall,
@@ -566,12 +566,12 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="PANNs noise classification pipeline.",
+        description="PANNs ESC (Environmental Sound Classification) pipeline.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python -m src.pipeline.noise chunks30\n"
-            "  python -m src.pipeline.noise chunks30 --pool_window 0.5\n"
+            "  python -m src.pipeline.esc chunks30\n"
+            "  python -m src.pipeline.esc chunks30 --pool_window 0.5\n"
         ),
     )
     parser.add_argument(

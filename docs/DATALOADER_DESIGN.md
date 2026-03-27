@@ -85,7 +85,7 @@ dataloader/
 │   ├── vad.py                  # VADAdapter (reads vad_meta, vad_raw, vad_merged)
 │   ├── vtc.py                  # VTCAdapter (reads vtc_meta, vtc_raw, vtc_merged)
 │   ├── snr.py                  # SNRAdapter (reads snr_meta, snr/*.npz)
-│   └── noise.py                # NoiseAdapter (reads noise_meta, noise/*.npz)
+│   └── esc.py                  # ESCAdapter (reads esc_meta, esc/*.npz)
 │
 ├── loader/                     # Feature Loader abstractions
 │   ├── __init__.py
@@ -387,7 +387,7 @@ dataloader/adapters/
 ├── vad.py             # VADAdapter(FeatureProcessor)
 ├── vtc.py             # VTCAdapter(FeatureProcessor)
 ├── snr.py             # SNRAdapter(FeatureProcessor)
-└── noise.py           # NoiseAdapter(FeatureProcessor)
+└── esc.py           # ESCAdapter(FeatureProcessor)
 ```
 
 Each adapter is **read-only**: it wraps existing pipeline outputs (parquet
@@ -432,7 +432,7 @@ filters = FilterConfig(
     min_speech_ratio=0.3,
     min_snr_db=10.0,
     required_labels=["KCHI"],
-    excluded_noise_categories=["music"],
+    excluded_esc_categories=["music"],
 )
 ```
 

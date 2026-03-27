@@ -1,8 +1,8 @@
-"""Tests for the PANNs noise classification pipeline.
+"""Tests for the PANNs ESC pipeline.
 
 Tests are split into two groups:
 
-1. **Pure-numpy tests** for ``pool_noise``, ``pool_to_categories``,
+1. **Pure-numpy tests** for ``pool_esc``, ``pool_to_categories``,
    ``map_to_categories`` — run anywhere (login node included).
 2. **GPU/model tests** for ``extract_panns`` and full inference — require
    PANNs + GPU (run via ``sbatch slurm/test.slurm``).
@@ -15,11 +15,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from src.pipeline.noise import (
+from src.pipeline.esc import (
     CATEGORIES,
     _SPEECH_INDICES,
     map_to_categories,
-    pool_noise,
+    pool_esc,
     pool_to_categories,
 )
 
@@ -57,7 +57,7 @@ class TestMapToCategories:
             assert val == 0.0, f"{cat} should be 0.0 with zero input"
 
     def test_speech_indices_excluded(self):
-        """Speech-related indices should not leak into noise categories."""
+        """Speech-related indices should not leak into ESC categories."""
         # Set only speech indices to 1.0, rest to 0.0
         probs = np.zeros(527, dtype=np.float32)
         for idx in _SPEECH_INDICES:
@@ -70,17 +70,17 @@ class TestMapToCategories:
 
 
 # ======================================================================
-# pool_noise — pure numpy
+# pool_esc — pure numpy
 # ======================================================================
 
 
 class TestPoolNoise:
-    """Unit tests for the noise pooling helper."""
+    """Unit tests for the ESC pooling helper."""
 
     def test_passthrough_when_pool_gte_step(self):
         """When pool_window >= step, just convert dtype."""
         raw = np.random.rand(5, 527).astype(np.float32)
-        pooled, step = pool_noise(raw, step_s=10.0, pool_window_s=10.0)
+        pooled, step = pool_esc(raw, step_s=10.0, pool_window_s=10.0)
 
         assert pooled.dtype == np.float16
         assert pooled.shape == (5, 527)
@@ -89,7 +89,7 @@ class TestPoolNoise:
     def test_upsample_when_pool_smaller(self):
         """When pool_window < step, repeat to approximate finer bins."""
         raw = np.ones((3, 527), dtype=np.float32) * 0.5
-        pooled, step = pool_noise(raw, step_s=10.0, pool_window_s=1.0)
+        pooled, step = pool_esc(raw, step_s=10.0, pool_window_s=1.0)
 
         assert pooled.dtype == np.float16
         # 3 windows × 10x repeat = 30 bins
@@ -100,7 +100,7 @@ class TestPoolNoise:
     def test_output_values_preserved(self):
         """Values should be preserved through pooling."""
         raw = np.ones((2, 527), dtype=np.float32) * 0.7
-        pooled, _ = pool_noise(raw, step_s=10.0, pool_window_s=10.0)
+        pooled, _ = pool_esc(raw, step_s=10.0, pool_window_s=10.0)
 
         np.testing.assert_allclose(pooled.astype(np.float32), 0.7, atol=0.01)
 
@@ -146,40 +146,40 @@ class TestPoolToCategories:
 
 
 # ======================================================================
-# Clip integration — noise_array on Clip dataclass
+# Clip integration — esc_array on Clip dataclass
 # ======================================================================
 
 
 class TestClipNoiseIntegration:
-    """Test noise fields on the Clip dataclass."""
+    """Test ESC fields on the Clip dataclass."""
 
-    def test_noise_profile_none_when_no_data(self):
-        """noise_profile should be None when no noise data attached."""
+    def test_esc_profile_none_when_no_data(self):
+        """esc_profile should be None when no ESC data attached."""
         from src.packaging.clips import Clip
 
         clip = Clip(abs_onset=0.0, abs_offset=10.0)
-        assert clip.noise_profile is None
-        assert clip.dominant_noise is None
+        assert clip.esc_profile is None
+        assert clip.dominant_esc is None
 
-    def test_noise_profile_with_data(self):
-        """noise_profile should return mean per category."""
+    def test_esc_profile_with_data(self):
+        """esc_profile should return mean per category."""
         from src.packaging.clips import Clip
 
         cats = CATEGORIES
         n = len(cats)
-        noise_arr = np.zeros((10, n), dtype=np.float16)
+        esc_arr = np.zeros((10, n), dtype=np.float16)
         # Make "music" (cats.index("music")) highest
         music_idx = cats.index("music")
-        noise_arr[:, music_idx] = 0.9
+        esc_arr[:, music_idx] = 0.9
 
         clip = Clip(abs_onset=0.0, abs_offset=10.0)
-        clip.noise_array = noise_arr
-        clip.noise_categories = cats
+        clip.esc_array = esc_arr
+        clip.esc_categories = cats
 
-        profile = clip.noise_profile
+        profile = clip.esc_profile
         assert profile is not None
         assert profile["music"] == pytest.approx(0.9, abs=0.05)
-        assert clip.dominant_noise == "music"
+        assert clip.dominant_esc == "music"
 
 
 # ======================================================================
@@ -222,7 +222,7 @@ class TestExtractPanns:
 
     def test_returns_correct_shape(self, speech_clean_wav: Path):
         """extract_panns returns (n_windows, 527) float32 array."""
-        from src.pipeline.noise import extract_panns
+        from src.pipeline.esc import extract_panns
 
         probs, step = extract_panns(self.at, speech_clean_wav, window_s=10.0)
 
@@ -235,7 +235,7 @@ class TestExtractPanns:
 
     def test_probabilities_in_range(self, speech_clean_wav: Path):
         """All probabilities should be in [0, 1]."""
-        from src.pipeline.noise import extract_panns
+        from src.pipeline.esc import extract_panns
 
         probs, _ = extract_panns(self.at, speech_clean_wav, window_s=10.0)
 
@@ -244,7 +244,7 @@ class TestExtractPanns:
 
     def test_speech_detected_in_speech_file(self, speech_clean_wav: Path):
         """Speech class (index 0) should have high probability for speech audio."""
-        from src.pipeline.noise import extract_panns
+        from src.pipeline.esc import extract_panns
 
         probs, _ = extract_panns(self.at, speech_clean_wav, window_s=10.0)
 
@@ -254,7 +254,7 @@ class TestExtractPanns:
 
     def test_silence_file(self, fixture_dir: Path):
         """Silence file should have low probabilities across categories."""
-        from src.pipeline.noise import extract_panns
+        from src.pipeline.esc import extract_panns
 
         silence_wav = fixture_dir / "silence.wav"
         if not silence_wav.exists():
@@ -268,7 +268,7 @@ class TestExtractPanns:
 
     def test_deterministic(self, speech_clean_wav: Path):
         """Two runs with same seed should give identical results."""
-        from src.pipeline.noise import extract_panns
+        from src.pipeline.esc import extract_panns
         from src.utils import set_seeds
 
         set_seeds(42)
@@ -281,7 +281,7 @@ class TestExtractPanns:
 
     def test_full_pipeline_npz_format(self, speech_clean_wav: Path, tmp_path: Path):
         """End-to-end: extract → pool → save → reload → verify."""
-        from src.pipeline.noise import extract_panns, pool_to_categories
+        from src.pipeline.esc import extract_panns, pool_to_categories
 
         probs, step = extract_panns(self.at, speech_clean_wav, window_s=10.0)
         pooled, cats, pool_step = pool_to_categories(probs, step, pool_window_s=1.0)
